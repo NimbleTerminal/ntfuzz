@@ -2,15 +2,16 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzzy/internal/store"
+	"github.com/NimbleTerminal/ntfuzz/internal/store"
 )
 
 // ActiveJob describes an in-flight fuzzing worker job managed by the orchestrator.
@@ -32,7 +33,7 @@ type Options struct {
 	Workers       int
 	RoundInterval time.Duration
 	Runner        WorkerRunner
-	Logger        *log.Logger
+	Logger        *slog.Logger
 }
 
 type scheduledTarget struct {
@@ -44,6 +45,13 @@ type scheduledTarget struct {
 	priority  int // lower runs first (0 = never run or recently added corpus, >0 = flat streak)
 }
 
+func (s scheduledTarget) effectiveModuleDir() string {
+	if s.target.ModuleDir != "" {
+		return s.target.ModuleDir
+	}
+	return s.checkout.RepoDir
+}
+
 // Orchestrator coordinates continuous checkout, target discovery, fuzzing execution,
 // and DuckDB persistence across a fleet of Go repositories.
 type Orchestrator struct {
@@ -52,11 +60,10 @@ type Orchestrator struct {
 	runner        WorkerRunner
 	workers       int
 	roundInterval time.Duration
-	logger        *log.Logger
+	logger        *slog.Logger
 
 	mu          sync.RWMutex
 	activeJobs  map[string]ActiveJob
-	moduleLocks map[string]*sync.Mutex
 	flatStreaks map[int64]int
 	skipCounts  map[int64]int
 }
@@ -77,7 +84,7 @@ func New(cfg Config, st *store.Store, opts Options) *Orchestrator {
 	}
 	logger := opts.Logger
 	if logger == nil {
-		logger = log.New(os.Stderr, "", log.LstdFlags)
+		logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 
 	return &Orchestrator{
@@ -88,7 +95,6 @@ func New(cfg Config, st *store.Store, opts Options) *Orchestrator {
 		roundInterval: interval,
 		logger:        logger,
 		activeJobs:    make(map[string]ActiveJob),
-		moduleLocks:   make(map[string]*sync.Mutex),
 		flatStreaks:   make(map[int64]int),
 		skipCounts:    make(map[int64]int),
 	}
@@ -122,7 +128,11 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 		}
 		checkout, err := EnsureCheckout(ctx, proj, o.cfg.WorkDir)
 		if err != nil {
-			o.logf("WARN", "project=%s msg=%q err=%q", proj.Name, "checkout/pull failed", err)
+			o.logger.Warn("checkout/pull failed",
+				"component", "orchestrator",
+				"project", proj.Name,
+				"err", err,
+			)
 			// Record the sync error visibly WITHOUT advancing last_synced
 			_, _ = o.store.SyncProject(ctx, store.ProjectSyncInput{
 				Name:      proj.Name,
@@ -147,13 +157,22 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 			SyncError: "",
 		})
 		if err != nil {
-			o.logf("ERROR", "project=%s msg=%q err=%q", proj.Name, "store sync project failed", err)
+			o.logger.Error("store sync project failed",
+				"component", "orchestrator",
+				"project", proj.Name,
+				"err", err,
+			)
 			continue
 		}
 
 		targets, err := DiscoverTargets(ctx, checkout.RepoDir)
 		if err != nil {
-			o.logf("WARN", "project=%s dir=%s msg=%q err=%q", proj.Name, checkout.RepoDir, "target discovery failed", err)
+			o.logger.Warn("target discovery failed",
+				"component", "orchestrator",
+				"project", proj.Name,
+				"dir", checkout.RepoDir,
+				"err", err,
+			)
 			continue
 		}
 
@@ -167,12 +186,22 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 
 		reconciledIDs, err := o.store.ReconcileProjectTargets(ctx, projID, keys)
 		if err != nil {
-			o.logf("ERROR", "project=%s msg=%q err=%q", proj.Name, "reconcile targets failed", err)
+			o.logger.Error("reconcile targets failed",
+				"component", "orchestrator",
+				"project", proj.Name,
+				"err", err,
+			)
 			continue
 		}
 
-		o.logf("INFO", "project=%s sha=%s dirty=%t targets=%d dir=%s msg=%q",
-			proj.Name, checkout.GitSHA, checkout.Dirty, len(targets), checkout.RepoDir, "synced project")
+		o.logger.Info("synced project",
+			"component", "orchestrator",
+			"project", proj.Name,
+			"sha", checkout.GitSHA,
+			"dirty", checkout.Dirty,
+			"targets", len(targets),
+			"dir", checkout.RepoDir,
+		)
 
 		for _, disc := range targets {
 			tID := reconciledIDs[store.TargetKey{Package: disc.PackageImport, Name: disc.FuncName}]
@@ -193,8 +222,63 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 	return scheduled
 }
 
+// moduleQueue coordinates non-starving dispatch of targets across workers so that:
+//  1. Two workers never execute inside the same Go module directory at the same time.
+//  2. A worker skips currently locked modules and picks work from any unlocked module instead of blocking.
+type moduleQueue struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	pending  []scheduledTarget
+	inFlight map[string]bool
+	closed   bool
+}
+
+func newModuleQueue(items []scheduledTarget) *moduleQueue {
+	q := &moduleQueue{
+		pending:  append([]scheduledTarget(nil), items...),
+		inFlight: make(map[string]bool),
+	}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+func (q *moduleQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	q.cond.Broadcast()
+	q.mu.Unlock()
+}
+
+func (q *moduleQueue) acquire(ctx context.Context) (scheduledTarget, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for {
+		if q.closed || ctx.Err() != nil || len(q.pending) == 0 {
+			return scheduledTarget{}, false
+		}
+		for i, item := range q.pending {
+			modDir := item.effectiveModuleDir()
+			if !q.inFlight[modDir] {
+				q.inFlight[modDir] = true
+				q.pending = append(q.pending[:i], q.pending[i+1:]...)
+				return item, true
+			}
+		}
+		// All remaining targets belong to modules currently being fuzzed by other workers; wait for release.
+		q.cond.Wait()
+	}
+}
+
+func (q *moduleQueue) release(modDir string) {
+	q.mu.Lock()
+	delete(q.inFlight, modDir)
+	q.cond.Broadcast()
+	q.mu.Unlock()
+}
+
 // RunOnce performs one synchronization, prioritizes targets that recently grew corpus,
-// and dispatches jobs across workers while serializing access per Go module directory.
+// and dispatches jobs across workers without starving workers on locked modules.
 func (o *Orchestrator) RunOnce(ctx context.Context) {
 	scheduled := o.SyncAll(ctx)
 	if len(scheduled) == 0 || ctx.Err() != nil {
@@ -202,12 +286,9 @@ func (o *Orchestrator) RunOnce(ctx context.Context) {
 	}
 
 	selected := o.selectDueTargets(scheduled)
-
-	jobsCh := make(chan scheduledTarget, len(selected))
-	for _, item := range selected {
-		jobsCh <- item
-	}
-	close(jobsCh)
+	queue := newModuleQueue(selected)
+	stopWake := context.AfterFunc(ctx, queue.close)
+	defer stopWake()
 
 	workerCount := min(o.workers, len(selected))
 	var wg sync.WaitGroup
@@ -216,18 +297,21 @@ func (o *Orchestrator) RunOnce(ctx context.Context) {
 		workerID := fmt.Sprintf("local-%d", i+1)
 		go func(wID string) {
 			defer wg.Done()
-			for item := range jobsCh {
-				if ctx.Err() != nil {
+			for {
+				item, ok := queue.acquire(ctx)
+				if !ok {
 					return
 				}
 				o.executeTarget(ctx, wID, item)
+				queue.release(item.effectiveModuleDir())
 			}
 		}(workerID)
 	}
 	wg.Wait()
 
-	// Apply 14-day run retention policy while keeping at least the latest 10 runs per target
-	_, _ = o.store.PruneOldRuns(ctx, 14*24*time.Hour, 10)
+	if ctx.Err() == nil {
+		_, _ = o.store.PruneOldRuns(ctx, 14*24*time.Hour, 10)
+	}
 }
 
 func (o *Orchestrator) selectDueTargets(all []scheduledTarget) []scheduledTarget {
@@ -258,7 +342,11 @@ func (o *Orchestrator) selectDueTargets(all []scheduledTarget) []scheduledTarget
 
 // Run starts the continuous orchestration loop until ctx is canceled.
 func (o *Orchestrator) Run(ctx context.Context) error {
-	o.logf("INFO", "projects=%d workers=%d msg=%q", len(o.cfg.Projects), o.workers, "starting orchestrator loop")
+	o.logger.Info("starting orchestrator loop",
+		"component", "orchestrator",
+		"projects", len(o.cfg.Projects),
+		"workers", o.workers,
+	)
 
 	for {
 		if ctx.Err() != nil {
@@ -268,7 +356,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 		select {
 		case <-ctx.Done():
-			o.logf("INFO", "msg=%q", "orchestrator loop stopped")
+			o.logger.Info("orchestrator loop stopped", "component", "orchestrator")
 			return nil
 		case <-time.After(o.roundInterval):
 		}
@@ -276,16 +364,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 }
 
 func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item scheduledTarget) {
-	moduleDir := item.target.ModuleDir
-	if moduleDir == "" {
-		moduleDir = item.checkout.RepoDir
-	}
-
-	// Ensure two workers never run `go test` in the same module directory simultaneously
-	modLock := o.moduleLock(moduleDir)
-	modLock.Lock()
-	defer modLock.Unlock()
-
+	moduleDir := item.effectiveModuleDir()
 	fuzzTime := item.project.EffectiveFuzzTime(o.cfg.DefaultFuzzTime)
 	corpusDir := item.project.EffectiveCorpusDir(o.cfg.CorpusDir)
 	isRemoteClone := !isLocalPathRepo(item.project.Repo)
@@ -315,16 +394,27 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 	})
 	defer o.clearActiveJob(workerID)
 
-	o.logf("INFO", "worker=%s project=%s target=%s sha=%s fuzztime=%s msg=%q",
-		workerID, job.Project, job.TargetName, item.checkout.GitSHA, fuzzTime, "fuzzing target")
+	o.logger.Info("fuzzing target",
+		"component", "orchestrator",
+		"worker", workerID,
+		"project", job.Project,
+		"target", job.TargetName,
+		"sha", item.checkout.GitSHA,
+		"fuzztime", fuzzTime.String(),
+	)
 
 	res, err := o.runner.RunTarget(ctx, job)
-	if err != nil && ctx.Err() != nil {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	if err != nil {
-		o.logf("WARN", "worker=%s project=%s target=%s msg=%q err=%q",
-			workerID, job.Project, job.TargetName, "runner error", err)
+		o.logger.Warn("runner error",
+			"component", "orchestrator",
+			"worker", workerID,
+			"project", job.Project,
+			"target", job.TargetName,
+			"err", err,
+		)
 	}
 
 	o.recordTargetActivity(item.targetID, res.NewInteresting, res.Crashes)
@@ -346,8 +436,13 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 		GoVersion:      item.checkout.GoVersion,
 	})
 	if storeErr != nil {
-		o.logf("ERROR", "worker=%s project=%s target=%s msg=%q err=%q",
-			workerID, job.Project, job.TargetName, "insert run failed", storeErr)
+		o.logger.Error("insert run failed",
+			"component", "orchestrator",
+			"worker", workerID,
+			"project", job.Project,
+			"target", job.TargetName,
+			"err", storeErr,
+		)
 	}
 
 	for _, crash := range res.CrashRecords {
@@ -372,28 +467,39 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 			GoVersion:        item.checkout.GoVersion,
 		})
 		if crashErr != nil {
-			o.logf("ERROR", "worker=%s project=%s target=%s msg=%q err=%q",
-				workerID, job.Project, job.TargetName, "record crash failed", crashErr)
+			o.logger.Error("record crash failed",
+				"component", "orchestrator",
+				"worker", workerID,
+				"project", job.Project,
+				"target", job.TargetName,
+				"err", crashErr,
+			)
 		} else {
-			o.logf("WARN", "worker=%s project=%s target=%s hash=%s fp=%s msg=%q",
-				workerID, job.Project, job.TargetName, crash.InputHash, crash.StackFingerprint, "crash recorded")
+			o.logger.Warn("crash recorded",
+				"component", "orchestrator",
+				"worker", workerID,
+				"project", job.Project,
+				"target", job.TargetName,
+				"hash", crash.InputHash,
+				"fp", crash.StackFingerprint,
+			)
 		}
 	}
 
-	o.logf("INFO", "worker=%s project=%s target=%s sha=%s status=%s execs=%d rate=%.0f/s new=%d corpus=%d cov=%.1f%% crashes=%d",
-		workerID, job.Project, job.TargetName, item.checkout.GitSHA, res.Status,
-		res.Execs, res.ExecsPerSec, res.NewInteresting, res.CorpusCount, res.CoveragePct, res.Crashes)
-}
-
-func (o *Orchestrator) moduleLock(moduleDir string) *sync.Mutex {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if m, ok := o.moduleLocks[moduleDir]; ok {
-		return m
-	}
-	m := &sync.Mutex{}
-	o.moduleLocks[moduleDir] = m
-	return m
+	o.logger.Info("completed target run",
+		"component", "orchestrator",
+		"worker", workerID,
+		"project", job.Project,
+		"target", job.TargetName,
+		"sha", item.checkout.GitSHA,
+		"status", res.Status,
+		"execs", res.Execs,
+		"rate", fmt.Sprintf("%.0f/s", res.ExecsPerSec),
+		"new", res.NewInteresting,
+		"corpus", res.CorpusCount,
+		"cov", fmt.Sprintf("%.1f%%", res.CoveragePct),
+		"crashes", res.Crashes,
+	)
 }
 
 func (o *Orchestrator) targetPriority(targetID int64) int {
@@ -423,14 +529,6 @@ func (o *Orchestrator) clearActiveJob(workerID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	delete(o.activeJobs, workerID)
-}
-
-func (o *Orchestrator) logf(level, format string, args ...any) {
-	if o.logger == nil {
-		return
-	}
-	msg := fmt.Sprintf(format, args...)
-	o.logger.Printf("level=%s component=orchestrator %s", level, msg)
 }
 
 func isLocalPathRepo(repo string) bool {

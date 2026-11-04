@@ -9,18 +9,14 @@ import (
 )
 
 var (
-	colorBg        = lipgloss.Color("#10151d")
-	colorPanelBg   = lipgloss.Color("#161f2c")
-	colorBorder    = lipgloss.Color("#2d3f56")
-	colorHighlight = lipgloss.Color("#3b82f6")
-	colorAccent    = lipgloss.Color("#38bdf8")
-	colorGreen     = lipgloss.Color("#22c55e")
-	colorRed       = lipgloss.Color("#ef4444")
-	colorYellow    = lipgloss.Color("#eab308")
-	colorPurple    = lipgloss.Color("#a855f7")
-	colorText      = lipgloss.Color("#e2e8f0")
-	colorSubtle    = lipgloss.Color("#94a3b8")
-	colorDim       = lipgloss.Color("#64748b")
+	colorBorder = lipgloss.Color("#2d3f56")
+	colorAccent = lipgloss.Color("#38bdf8")
+	colorGreen  = lipgloss.Color("#22c55e")
+	colorRed    = lipgloss.Color("#ef4444")
+	colorYellow = lipgloss.Color("#eab308")
+	colorText   = lipgloss.Color("#e2e8f0")
+	colorSubtle = lipgloss.Color("#94a3b8")
+	colorDim    = lipgloss.Color("#64748b")
 
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).

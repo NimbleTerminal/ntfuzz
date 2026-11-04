@@ -19,11 +19,11 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient creates a new API client pointed at baseURL (e.g. "http://localhost:8080").
+// NewClient creates a new API client pointed at baseURL (defaults to "http://127.0.0.1:8080").
 func NewClient(baseURL string) *Client {
 	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if trimmed == "" {
-		trimmed = "http://localhost:8080"
+		trimmed = "http://127.0.0.1:8080"
 	}
 	return &Client{
 		baseURL: trimmed,
@@ -41,14 +41,14 @@ func (c *Client) BaseURL() string {
 // GetStatus fetches overall fleet health and active jobs from GET /api/status.
 func (c *Client) GetStatus(ctx context.Context) (StatusResponse, error) {
 	var out StatusResponse
-	err := c.getJSON(ctx, "/api/status", nil, &out)
+	err := c.doJSON(ctx, http.MethodGet, "/api/status", nil, nil, &out)
 	return out, err
 }
 
 // GetProjects fetches all projects with latest status summaries from GET /api/projects.
 func (c *Client) GetProjects(ctx context.Context) ([]Project, error) {
 	var out []Project
-	err := c.getJSON(ctx, "/api/projects", nil, &out)
+	err := c.doJSON(ctx, http.MethodGet, "/api/projects", nil, nil, &out)
 	return out, err
 }
 
@@ -59,7 +59,7 @@ func (c *Client) GetTargets(ctx context.Context, project string) ([]Target, erro
 		q.Set("project", project)
 	}
 	var out []Target
-	err := c.getJSON(ctx, "/api/targets", q, &out)
+	err := c.doJSON(ctx, http.MethodGet, "/api/targets", q, nil, &out)
 	return out, err
 }
 
@@ -73,7 +73,7 @@ func (c *Client) GetRuns(ctx context.Context, target string, limit int) ([]Run, 
 		q.Set("limit", strconv.Itoa(limit))
 	}
 	var out []Run
-	err := c.getJSON(ctx, "/api/runs", q, &out)
+	err := c.doJSON(ctx, http.MethodGet, "/api/runs", q, nil, &out)
 	return out, err
 }
 
@@ -85,32 +85,14 @@ func (c *Client) GetCrashes(ctx context.Context, openOnly bool, target string) (
 		q.Set("target", target)
 	}
 	var out []Crash
-	err := c.getJSON(ctx, "/api/crashes", q, &out)
+	err := c.doJSON(ctx, http.MethodGet, "/api/crashes", q, nil, &out)
 	return out, err
 }
 
 // MarkCrashFixed marks a crash as fixed via POST /api/crashes/{id}/fix.
 func (c *Client) MarkCrashFixed(ctx context.Context, crashID int64, issueURL string) error {
 	path := fmt.Sprintf("/api/crashes/%d/fix", crashID)
-	body, err := json.Marshal(FixCrashRequest{IssueURL: issueURL})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("POST %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("POST %s returned HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-	return nil
+	return c.doJSON(ctx, http.MethodPost, path, nil, FixCrashRequest{IssueURL: issueURL}, nil)
 }
 
 // GetCoverageHistory fetches chronological coverage points from GET /api/coverage/history.
@@ -118,31 +100,47 @@ func (c *Client) GetCoverageHistory(ctx context.Context, target string) ([]Cover
 	q := url.Values{}
 	q.Set("target", target)
 	var out []CoveragePoint
-	err := c.getJSON(ctx, "/api/coverage/history", q, &out)
+	err := c.doJSON(ctx, http.MethodGet, "/api/coverage/history", q, nil, &out)
 	return out, err
 }
 
-func (c *Client) getJSON(ctx context.Context, path string, query url.Values, dst any) error {
+func (c *Client) doJSON(ctx context.Context, method, path string, query url.Values, reqBody, dst any) error {
 	u := c.baseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return fmt.Errorf("create request %s: %w", u, err)
+
+	var bodyReader io.Reader
+	if reqBody != nil {
+		raw, err := json.Marshal(reqBody)
+		if err != nil {
+			return fmt.Errorf("encode %s %s body: %w", method, path, err)
+		}
+		bodyReader = bytes.NewReader(raw)
 	}
+
+	req, err := http.NewRequestWithContext(ctx, method, u, bodyReader)
+	if err != nil {
+		return fmt.Errorf("create request %s %s: %w", method, u, err)
+	}
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request %s: %w", u, err)
+		return fmt.Errorf("request %s %s: %w", method, u, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("GET %s returned HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%s %s returned HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
-		return fmt.Errorf("decode %s: %w", path, err)
+	if dst != nil {
+		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+			return fmt.Errorf("decode %s %s: %w", method, path, err)
+		}
 	}
 	return nil
 }

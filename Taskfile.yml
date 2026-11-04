@@ -19,9 +19,19 @@ tasks:
       - go build -o {{.BINARY}} ./cmd/ntfuzz
 
   test:
-    desc: Run all unit and integration tests
+    desc: Run all fast unit and integration tests
     cmds:
       - go test -v ./...
+
+  test-e2e:
+    desc: Run live go test -fuzz subprocess end-to-end test
+    cmds:
+      - NTFUZZ_E2E=1 go test -v ./internal/orchestrator -run TestLocalRunnerEndToEnd
+
+  lint:
+    desc: Run golangci-lint across the codebase
+    cmds:
+      - golangci-lint run ./...
 
   serve:
     desc: Build and run ntfuzz serve (orchestrator + DuckDB + HTTP API + Booba web TUI)

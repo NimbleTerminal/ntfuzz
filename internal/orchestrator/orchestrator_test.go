@@ -5,11 +5,83 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzzy/internal/store"
+	"github.com/NimbleTerminal/ntfuzz/internal/store"
 )
+
+func TestParseConfigValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "valid config",
+			yaml: `
+default_fuzztime: 10s
+projects:
+  - name: p1
+    repo: ./examples/demo-parser
+    fuzztime: 5s
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid project fuzztime missing unit",
+			yaml: `
+projects:
+  - name: p1
+    repo: ./examples/demo-parser
+    fuzztime: "30"
+`,
+			wantErr: "invalid fuzztime",
+		},
+		{
+			name: "invalid default_fuzztime",
+			yaml: `
+default_fuzztime: "-5s"
+projects:
+  - name: p1
+    repo: ./examples/demo-parser
+`,
+			wantErr: "invalid default_fuzztime",
+		},
+		{
+			name: "missing project name",
+			yaml: `
+projects:
+  - repo: ./examples/demo-parser
+`,
+			wantErr: "missing name",
+		},
+		{
+			name: "missing project repo",
+			yaml: `
+projects:
+  - name: p1
+`,
+			wantErr: "missing repo",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseConfig([]byte(tc.yaml))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+			}
+		})
+	}
+}
 
 func TestParseFuzzOutput(t *testing.T) {
 	sampleOut := `fuzz: elapsed: 0s, gathering baseline coverage: 0/4 completed
@@ -52,8 +124,8 @@ fuzz: elapsed: 1s, execs: 1420 (1420/sec), new interesting: 1 (total: 3)
 FAIL
 exit status 1
 `
-	crashOut2 := `--- FAIL: FuzzDecode (0.42s)
-    --- FAIL: FuzzDecode (0.00s)
+	crashOut2 := `--- FAIL: FuzzDecode (0.91s)
+    --- FAIL: FuzzDecode (0.01s)
         /another/path/codec_test.go:99: unexpected header magic 0xff
     
     Failing input written to testdata/fuzz/FuzzDecode/1111111111111111
@@ -65,10 +137,113 @@ exit status 1
 	if res1.Status != "crash" || len(res1.CrashRecords) != 1 {
 		t.Fatalf("expected 1 crash record, got %+v", res1)
 	}
-	// Stack fingerprint should match despite path and line number changes
+	if strings.Contains(res1.CrashRecords[0].Stack, "Failing input written to") {
+		t.Fatalf("expected extractCrashStack to strip footer, got:\n%s", res1.CrashRecords[0].Stack)
+	}
+	// Stack fingerprint should match despite path, duration, and line number changes
 	if res1.CrashRecords[0].StackFingerprint == "" || res1.CrashRecords[0].StackFingerprint != res2.CrashRecords[0].StackFingerprint {
 		t.Fatalf("expected identical stack fingerprints across line number shift, got %q vs %q",
 			res1.CrashRecords[0].StackFingerprint, res2.CrashRecords[0].StackFingerprint)
+	}
+}
+
+func TestMigrateLegacyCorpus(t *testing.T) {
+	tmp := t.TempDir()
+	pkgSeg := "example.com_demo-parser"
+	targetName := "FuzzParseKV"
+
+	legacyDir := filepath.Join(tmp, pkgSeg, targetName, targetName)
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyFile := filepath.Join(legacyDir, "seed123")
+	if err := os.WriteFile(legacyFile, []byte("go test fuzz v1\nstring(\"a=b\")\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	targetCacheRoot := filepath.Join(tmp, "cache", pkgSeg)
+	if err := MigrateLegacyCorpus(tmp, pkgSeg, targetName, targetCacheRoot); err != nil {
+		t.Fatalf("MigrateLegacyCorpus: %v", err)
+	}
+
+	migratedFile := filepath.Join(targetCacheRoot, targetName, "seed123")
+	if _, err := os.Stat(migratedFile); err != nil {
+		t.Fatalf("expected migrated file at %s: %v", migratedFile, err)
+	}
+	if _, err := os.Stat(legacyFile); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy file to be removed after migration")
+	}
+}
+
+func TestSchedulerNoModuleStarvationAndBackoff(t *testing.T) {
+	// Module A has 2 targets at the front of the queue; Module B has 1 target after Module A.
+	// With 2 workers, Worker 1 takes Module A target 1, and Worker 2 must immediately skip
+	// Module A target 2 and run Module B target 1 concurrently!
+	items := []scheduledTarget{
+		{
+			project:  ProjectConfig{Name: "modA"},
+			checkout: CheckoutInfo{RepoDir: "/tmp/modA"},
+			target:   DiscoveredTarget{ModuleDir: "/tmp/modA", FuncName: "FuzzA1"},
+			targetID: 1,
+		},
+		{
+			project:  ProjectConfig{Name: "modA"},
+			checkout: CheckoutInfo{RepoDir: "/tmp/modA"},
+			target:   DiscoveredTarget{ModuleDir: "/tmp/modA", FuncName: "FuzzA2"},
+			targetID: 2,
+		},
+		{
+			project:  ProjectConfig{Name: "modB"},
+			checkout: CheckoutInfo{RepoDir: "/tmp/modB"},
+			target:   DiscoveredTarget{ModuleDir: "/tmp/modB", FuncName: "FuzzB1"},
+			targetID: 3,
+		},
+	}
+
+	q := newModuleQueue(items)
+	ctx := context.Background()
+
+	first, ok := q.acquire(ctx)
+	if !ok || first.target.FuncName != "FuzzA1" {
+		t.Fatalf("expected Worker 1 to acquire FuzzA1, got %+v", first)
+	}
+
+	// While modA is still in-flight, Worker 2 acquires next -> must get FuzzB1 without blocking!
+	second, ok := q.acquire(ctx)
+	if !ok || second.target.FuncName != "FuzzB1" {
+		t.Fatalf("expected Worker 2 to skip locked modA and acquire FuzzB1, got %+v", second)
+	}
+
+	q.release(first.effectiveModuleDir())
+	q.release(second.effectiveModuleDir())
+
+	third, ok := q.acquire(ctx)
+	if !ok || third.target.FuncName != "FuzzA2" {
+		t.Fatalf("expected remaining item FuzzA2 after modA release, got %+v", third)
+	}
+	q.release(third.effectiveModuleDir())
+
+	// Also verify backoff after 3 consecutive flat runs
+	orch := New(Config{}, nil, Options{Workers: 2})
+	for i := 0; i < 3; i++ {
+		orch.recordTargetActivity(1, 0, 0) // target 1 has 3 flat runs (streak=3 -> maxSkip=1)
+	}
+	orch.recordTargetActivity(3, 2, 0) // target 3 found 2 new inputs (streak=0)
+
+	due := orch.selectDueTargets([]scheduledTarget{
+		{targetID: 1, priority: orch.targetPriority(1)},
+		{targetID: 3, priority: orch.targetPriority(3)},
+	})
+	if len(due) != 1 || due[0].targetID != 3 {
+		t.Fatalf("expected flat target 1 to back off for 1 round while target 3 runs, got %+v", due)
+	}
+	// On the next round, target 1 is due again
+	dueNext := orch.selectDueTargets([]scheduledTarget{
+		{targetID: 1, priority: orch.targetPriority(1)},
+		{targetID: 3, priority: orch.targetPriority(3)},
+	})
+	if len(dueNext) != 2 {
+		t.Fatalf("expected both targets due on next round, got %+v", dueNext)
 	}
 }
 
@@ -146,7 +321,7 @@ func FuzzSubBeta(f *testing.F) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	cfg := Config{
 		CorpusDir:       filepath.Join(tmp, "corpus"),
@@ -158,11 +333,20 @@ func FuzzSubBeta(f *testing.F) {
 		},
 	}
 
+	var concurrent int32
+	var maxConcurrent int32
 	orch := New(cfg, st, Options{
 		Workers: 2,
-		Runner:  stubRunner{},
+		Runner: &concurrencyTrackingRunner{
+			concurrent:    &concurrent,
+			maxConcurrent: &maxConcurrent,
+		},
 	})
 	orch.RunOnce(ctx)
+
+	if atomic.LoadInt32(&maxConcurrent) < 2 {
+		t.Fatalf("expected 2 workers to fuzz samplemod and samplemod/submod in parallel, maxConcurrent=%d", maxConcurrent)
+	}
 
 	projects, err := st.ListProjects(ctx)
 	if err != nil {
@@ -183,9 +367,22 @@ func FuzzSubBeta(f *testing.F) {
 	}
 }
 
-type stubRunner struct{}
+type concurrencyTrackingRunner struct {
+	concurrent    *int32
+	maxConcurrent *int32
+}
 
-func (stubRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, error) {
+func (r *concurrencyTrackingRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, error) {
+	cur := atomic.AddInt32(r.concurrent, 1)
+	for {
+		prev := atomic.LoadInt32(r.maxConcurrent)
+		if cur <= prev || atomic.CompareAndSwapInt32(r.maxConcurrent, prev, cur) {
+			break
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+	atomic.AddInt32(r.concurrent, -1)
+
 	return JobResult{
 		Started:          time.Now().UTC(),
 		DurationSec:      1.0,
@@ -200,8 +397,8 @@ func (stubRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, error)
 }
 
 func TestLocalRunnerEndToEnd(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping real go test -fuzz in short mode")
+	if testing.Short() || os.Getenv("NTFUZZ_E2E") == "" {
+		t.Skip("skipping live go test -fuzz subprocess test (set NTFUZZ_E2E=1 to run)")
 	}
 	ctx := context.Background()
 	repoDir, err := filepath.Abs("../../examples/demo-parser")

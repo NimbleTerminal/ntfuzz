@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,9 +82,13 @@ var (
 )
 
 // RunTarget executes `go test -fuzz` with GOMAXPROCS=1 and -parallel=1, copies any crash inputs into
-// the persistent corpus tree (hashing the input bytes), and measures corpus coverage by replaying
-// the cached corpus entries.
+// the persistent corpus tree (hashing the input bytes), and measures corpus coverage in an isolated
+// temporary copy of the module.
 func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, error) {
+	if err := ctx.Err(); err != nil {
+		return JobResult{}, err
+	}
+
 	started := time.Now().UTC()
 	fuzzTime := job.FuzzTime
 	if fuzzTime <= 0 {
@@ -94,10 +99,14 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 	if err != nil {
 		absCorpusRoot = job.CorpusDir
 	}
-	targetCacheRoot := filepath.Join(absCorpusRoot, "cache", sanitizePathSegment(job.PkgImport))
+	pkgSeg := sanitizePathSegment(job.PkgImport)
+	targetCacheRoot := filepath.Join(absCorpusRoot, "cache", pkgSeg)
 	if err := os.MkdirAll(targetCacheRoot, 0o755); err != nil {
 		return JobResult{Started: started, Status: "error"}, fmt.Errorf("mkdir corpus cache %q: %w", targetCacheRoot, err)
 	}
+
+	// One-time automatic migration of any legacy corpus layout (<corpus>/<pkg>/<Target>/<Target>/*)
+	_ = MigrateLegacyCorpus(absCorpusRoot, pkgSeg, job.TargetName, targetCacheRoot)
 
 	pkgArg := job.PkgRelDir
 	if pkgArg == "" {
@@ -122,10 +131,17 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 
 	cmd := exec.CommandContext(runCtx, "go", args...)
 	cmd.Dir = job.RepoDir
-	// Cap child fuzzer concurrency to 1 worker process per orchestrator worker slot
 	cmd.Env = append(os.Environ(), "GOMAXPROCS=1")
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(os.Interrupt)
+	}
+	cmd.WaitDelay = 5 * time.Second
 
 	outBytes, runErr := cmd.CombinedOutput()
+	if err := ctx.Err(); err != nil {
+		return JobResult{Started: started, Output: string(outBytes)}, err
+	}
+
 	duration := time.Since(started).Seconds()
 	output := string(outBytes)
 
@@ -136,7 +152,7 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 	if pkgArg != "." {
 		pkgDir = filepath.Join(job.RepoDir, strings.TrimPrefix(pkgArg, "./"))
 	}
-	crashStoreDir := filepath.Join(absCorpusRoot, "crashes", sanitizePathSegment(job.PkgImport), job.TargetName)
+	crashStoreDir := filepath.Join(absCorpusRoot, "crashes", pkgSeg, job.TargetName)
 	for i := range res.CrashRecords {
 		rec := &res.CrashRecords[i]
 		if rec.MinimizedInput != "" && rec.MinimizedInput != "inline-failure" {
@@ -157,15 +173,43 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 		res.CorpusCount = len(cachedFiles)
 	}
 
-	// Measure statement coverage across f.Add seeds + testdata/fuzz + cached corpus entries
-	if !res.CoverageMeasured {
-		if cov, measured, covErr := measureCorpusCoverage(ctx, job.RepoDir, pkgDir, pkgArg, exactPattern, job.TargetName, cacheTargetDir); covErr == nil && measured {
+	// Measure statement coverage across f.Add seeds + testdata/fuzz + cached corpus entries in an isolated temp copy
+	if !res.CoverageMeasured && ctx.Err() == nil {
+		if cov, measured, covErr := measureCorpusCoverage(ctx, job.RepoDir, pkgArg, exactPattern, job.TargetName, cacheTargetDir); covErr == nil && measured {
 			res.CoveragePct = cov
 			res.CoverageMeasured = true
 		}
 	}
 
 	return res, nil
+}
+
+// MigrateLegacyCorpus moves corpus entries from the older <corpusRoot>/<pkgSeg>/<targetName>[/<targetName>]
+// layout into the new <targetCacheRoot>/<targetName> directory if present.
+func MigrateLegacyCorpus(absCorpusRoot, pkgSeg, targetName, targetCacheRoot string) error {
+	legacyOuter := filepath.Join(absCorpusRoot, pkgSeg, targetName)
+	if !dirExists(legacyOuter) {
+		return nil
+	}
+	dstDir := filepath.Join(targetCacheRoot, targetName)
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+
+	legacyInner := filepath.Join(legacyOuter, targetName)
+	for _, srcDir := range []string{legacyInner, legacyOuter} {
+		for _, f := range listRegularFiles(srcDir) {
+			dst := filepath.Join(dstDir, filepath.Base(f))
+			if _, err := os.Stat(dst); os.IsNotExist(err) {
+				_ = copyFile(f, dst)
+			}
+			_ = os.Remove(f)
+		}
+	}
+	_ = os.Remove(legacyInner)
+	_ = os.Remove(legacyOuter)
+	_ = os.Remove(filepath.Join(absCorpusRoot, pkgSeg))
+	return nil
 }
 
 // ParseFuzzOutput extracts execution metrics, coverage, status, stack fingerprints, and crash artifacts.
@@ -298,43 +342,34 @@ func persistCrashInput(srcPath, crashStoreDir string, removeOriginal bool) (stri
 	return dstPath, contentHash, nil
 }
 
-// measureCorpusCoverage replays the cached fuzz corpus entries by temporarily staging them
-// into testdata/fuzz/<TargetName> (cleaning up staged files in defer) and running `go test -cover`.
-func measureCorpusCoverage(ctx context.Context, moduleDir, pkgDir, pkgArg, exactPattern, targetName, cacheTargetDir string) (float64, bool, error) {
-	seedDir := filepath.Join(pkgDir, "testdata", "fuzz", targetName)
-	hadTestdataDir := dirExists(filepath.Join(pkgDir, "testdata"))
-	hadFuzzDir := dirExists(filepath.Join(pkgDir, "testdata", "fuzz"))
-	hadSeedDir := dirExists(seedDir)
+// measureCorpusCoverage replays the cached fuzz corpus entries in an isolated temporary copy of the module
+// so that the user's repository is never modified on disk.
+func measureCorpusCoverage(ctx context.Context, moduleDir, pkgArg, exactPattern, targetName, cacheTargetDir string) (float64, bool, error) {
+	tmpModDir, err := os.MkdirTemp("", "ntfuzz-cov-*")
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = os.RemoveAll(tmpModDir) }()
 
-	var stagedFiles []string
+	if err := copyModuleTree(moduleDir, tmpModDir); err != nil {
+		return 0, false, err
+	}
+
+	tmpPkgDir := tmpModDir
+	if pkgArg != "." && pkgArg != "" {
+		tmpPkgDir = filepath.Join(tmpModDir, strings.TrimPrefix(pkgArg, "./"))
+	}
+
 	cachedFiles := listRegularFiles(cacheTargetDir)
 	if len(cachedFiles) > 0 {
-		if err := os.MkdirAll(seedDir, 0o755); err == nil {
+		seedDir := filepath.Join(tmpPkgDir, "testdata", "fuzz", targetName)
+		if mkErr := os.MkdirAll(seedDir, 0o755); mkErr == nil {
 			for _, src := range cachedFiles {
-				base := "ntfuzz_cache_" + filepath.Base(src)
-				dst := filepath.Join(seedDir, base)
-				if _, existsErr := os.Stat(dst); os.IsNotExist(existsErr) {
-					if copyFile(src, dst) == nil {
-						stagedFiles = append(stagedFiles, dst)
-					}
-				}
+				dst := filepath.Join(seedDir, "ntfuzz_cache_"+filepath.Base(src))
+				_ = copyFile(src, dst)
 			}
 		}
 	}
-	defer func() {
-		for _, f := range stagedFiles {
-			_ = os.Remove(f)
-		}
-		if !hadSeedDir {
-			_ = os.Remove(seedDir)
-		}
-		if !hadFuzzDir {
-			_ = os.Remove(filepath.Join(pkgDir, "testdata", "fuzz"))
-		}
-		if !hadTestdataDir {
-			_ = os.Remove(filepath.Join(pkgDir, "testdata"))
-		}
-	}()
 
 	covCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -345,14 +380,42 @@ func measureCorpusCoverage(ctx context.Context, moduleDir, pkgDir, pkgArg, exact
 		"-cover",
 		pkgArg,
 	)
-	cmd.Dir = moduleDir
+	cmd.Dir = tmpModDir
 	cmd.Env = append(os.Environ(), "GOMAXPROCS=1")
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(os.Interrupt)
+	}
+	cmd.WaitDelay = 5 * time.Second
+
 	out, _ := cmd.CombinedOutput()
 	if m := reCoverage.FindStringSubmatch(string(out)); m != nil {
-		cov, err := strconv.ParseFloat(m[1], 64)
-		return cov, err == nil, err
+		cov, parseErr := strconv.ParseFloat(m[1], 64)
+		return cov, parseErr == nil, parseErr
 	}
 	return 0, false, nil
+}
+
+func copyModuleTree(srcRoot, dstRoot string) error {
+	return filepath.WalkDir(srcRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(srcRoot, path)
+		if relErr != nil || rel == "." {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == ".ntfuzz" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return os.MkdirAll(filepath.Join(dstRoot, rel), 0o755)
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		return copyFile(path, filepath.Join(dstRoot, rel))
+	})
 }
 
 func listRegularFiles(dir string) []string {
@@ -374,18 +437,22 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func copyFile(src, dst string) error {
+func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		if closeErr := out.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 
 	_, err = io.Copy(out, in)
 	return err

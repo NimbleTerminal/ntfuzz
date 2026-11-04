@@ -2,14 +2,16 @@ package api
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzzy/internal/orchestrator"
-	"github.com/NimbleTerminal/ntfuzzy/internal/store"
+	"github.com/NimbleTerminal/ntfuzz/internal/orchestrator"
+	"github.com/NimbleTerminal/ntfuzz/internal/store"
 )
 
 type stubWorkerStatus struct {
@@ -25,7 +27,7 @@ func TestAPIServerAndClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	now := time.Now().UTC()
 	pID, err := st.SyncProject(ctx, store.ProjectSyncInput{
@@ -56,7 +58,7 @@ func TestAPIServerAndClient(t *testing.T) {
 		Status:         "crash",
 		Worker:         "local-1",
 		GitSHA:         "a1b2c3d4e5f6",
-		GoVersion:      "go1.27.3",
+		GoVersion:      "go1.27",
 	})
 	if err != nil {
 		t.Fatalf("InsertRun: %v", err)
@@ -70,7 +72,7 @@ func TestAPIServerAndClient(t *testing.T) {
 		InputHash:        "cafebabe00112233",
 		MinimizedInput:   ".ntfuzz/corpus/demo-codec/crashes/FuzzDecodePacket/cafebabe00112233",
 		GitSHA:           "a1b2c3d4e5f6",
-		GoVersion:        "go1.27.3",
+		GoVersion:        "go1.27",
 	})
 	if err != nil {
 		t.Fatalf("RecordCrash: %v", err)
@@ -94,6 +96,16 @@ func TestAPIServerAndClient(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL)
+
+	// Verify no wildcard CORS header is emitted
+	rawResp, err := http.Get(ts.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = rawResp.Body.Close()
+	if got := rawResp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("expected no Access-Control-Allow-Origin header, got %q", got)
+	}
 
 	status, err := client.GetStatus(ctx)
 	if err != nil {
@@ -135,6 +147,36 @@ func TestAPIServerAndClient(t *testing.T) {
 		t.Fatalf("unexpected crashes: %+v", crashes)
 	}
 
+	// Test invalid ?open= parameter returns 400
+	badOpenResp, err := http.Get(ts.URL + "/api/crashes?open=invalid_bool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = badOpenResp.Body.Close()
+	if badOpenResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid ?open= parameter, got %d", badOpenResp.StatusCode)
+	}
+
+	// Test malformed JSON on POST /api/crashes/{id}/fix returns 400
+	badJSONResp, err := http.Post(ts.URL+"/api/crashes/1/fix", "application/json", strings.NewReader("{bad json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = badJSONResp.Body.Close()
+	if badJSONResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on malformed JSON body, got %d", badJSONResp.StatusCode)
+	}
+
+	// Test unknown crash ID on POST /api/crashes/{id}/fix returns 404
+	notFoundResp, err := http.Post(ts.URL+"/api/crashes/99999/fix", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = notFoundResp.Body.Close()
+	if notFoundResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown crash ID, got %d", notFoundResp.StatusCode)
+	}
+
 	// Mark crash fixed via POST /api/crashes/{id}/fix
 	if err := client.MarkCrashFixed(ctx, crashID, "https://github.com/example/codec/issues/7"); err != nil {
 		t.Fatalf("MarkCrashFixed: %v", err)
@@ -142,6 +184,10 @@ func TestAPIServerAndClient(t *testing.T) {
 	openAfterFix, err := client.GetCrashes(ctx, true, "")
 	if err != nil || len(openAfterFix) != 0 {
 		t.Fatalf("expected 0 open crashes after MarkCrashFixed, got %+v (err=%v)", openAfterFix, err)
+	}
+	allCrashes, err := client.GetCrashes(ctx, false, "")
+	if err != nil || len(allCrashes) != 1 || allCrashes[0].FixedAt == nil {
+		t.Fatalf("expected 1 total crash when open=false, got %+v (err=%v)", allCrashes, err)
 	}
 
 	history, err := client.GetCoverageHistory(ctx, strconv.FormatInt(tID, 10))

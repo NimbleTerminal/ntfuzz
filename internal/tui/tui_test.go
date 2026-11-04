@@ -8,7 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/NimbleMarkets/go-booba/actions/bubblehelp"
 
-	"github.com/NimbleTerminal/ntfuzzy/internal/api"
+	"github.com/NimbleTerminal/ntfuzz/internal/api"
 )
 
 func TestModelPureTransitionsAndViews(t *testing.T) {

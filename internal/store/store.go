@@ -16,6 +16,9 @@ import (
 // CurrentSchemaVersion tracks the DuckDB schema version.
 const CurrentSchemaVersion = 2
 
+// ErrNotFound is returned when a requested record does not exist.
+var ErrNotFound = errors.New("record not found")
+
 // Store manages persistence of fuzzing projects, targets, runs, and crashes in DuckDB.
 type Store struct {
 	db *sql.DB
@@ -668,7 +671,7 @@ func (s *Store) MarkCrashFixed(ctx context.Context, crashID int64, fixedAt time.
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return fmt.Errorf("crash %d not found", crashID)
+		return fmt.Errorf("crash %d: %w", crashID, ErrNotFound)
 	}
 	return nil
 }
@@ -738,7 +741,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []Project
 	for rows.Next() {
@@ -806,7 +809,7 @@ func (s *Store) ListTargets(ctx context.Context, projectFilter string) ([]Target
 	if err != nil {
 		return nil, fmt.Errorf("list targets: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var targets []Target
 	for rows.Next() {
@@ -875,7 +878,7 @@ func (s *Store) ListRuns(ctx context.Context, targetFilter string, limit int) ([
 	if err != nil {
 		return nil, fmt.Errorf("list runs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var runs []Run
 	for rows.Next() {
@@ -932,7 +935,7 @@ func (s *Store) ListCrashes(ctx context.Context, openOnly bool, targetFilter str
 	if err != nil {
 		return nil, fmt.Errorf("list crashes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var crashes []Crash
 	for rows.Next() {
@@ -996,7 +999,7 @@ func (s *Store) GetCoverageHistory(ctx context.Context, targetFilter string, lim
 	if err != nil {
 		return nil, fmt.Errorf("get coverage history: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var points []CoveragePoint
 	for rows.Next() {

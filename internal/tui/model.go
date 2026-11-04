@@ -16,7 +16,7 @@ import (
 	"github.com/NimbleMarkets/go-booba/actions/bubblehelp"
 	"github.com/NimbleMarkets/ntcharts/v2/sparkline"
 
-	"github.com/NimbleTerminal/ntfuzzy/internal/api"
+	"github.com/NimbleTerminal/ntfuzz/internal/api"
 )
 
 type tickMsg time.Time
@@ -539,7 +539,7 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) renderHeader() string {
-	apiURL := "http://localhost:8080"
+	apiURL := "http://127.0.0.1:8080"
 	if m.client != nil {
 		apiURL = m.client.BaseURL()
 	}
@@ -693,14 +693,14 @@ func (m Model) renderDetailView() string {
 	t := m.detailTarget
 
 	var top strings.Builder
-	top.WriteString(fmt.Sprintf("Target: %s  •  Project: %s  •  Package: %s  •  Rev: %s  •  Go: %s\n",
+	fmt.Fprintf(&top, "Target: %s  •  Project: %s  •  Package: %s  •  Rev: %s  •  Go: %s\n",
 		cardValueStyle.Render(t.Name),
 		cardValueStyle.Render(t.ProjectName),
 		subtleTextStyle.Render(t.Package),
 		cardValueStyle.Render(formatRevision(t.GitSHA, t.Dirty)),
 		subtleTextStyle.Render(nonEmpty(t.GoVersion, "n/a")),
-	))
-	top.WriteString(fmt.Sprintf("Status: %s  •  Rate: %s  •  Corpus: %d  •  Coverage: %.1f%%  •  Trend: %s  •  Runs: %d  •  Open Crashes: %d\n",
+	)
+	fmt.Fprintf(&top, "Status: %s  •  Rate: %s  •  Corpus: %d  •  Coverage: %.1f%%  •  Trend: %s  •  Runs: %d  •  Open Crashes: %d\n",
 		RenderStatusBadge(t.Status, false),
 		cardValueStyle.Render(FormatExecRate(t.ExecsPerSec)),
 		t.CorpusCount,
@@ -708,7 +708,7 @@ func (m Model) renderDetailView() string {
 		RenderCoverageTrend(t.CoverageTrend, 10),
 		t.TotalRuns,
 		t.OpenCrashes,
-	))
+	)
 
 	// Sparkline + Recent Runs
 	sparkBox := panelStyle.Render(
@@ -729,14 +729,14 @@ func (m Model) renderDetailView() string {
 				crashB.WriteString(subtleTextStyle.Render(fmt.Sprintf("\n...and %d more open crashes", len(m.detailCrashes)-3)))
 				break
 			}
-			crashB.WriteString(fmt.Sprintf("• %s  fp:%s  rev:%s  artifact: %s  (last seen %s)\n  %s\n",
+			fmt.Fprintf(&crashB, "• %s  fp:%s  rev:%s  artifact: %s  (last seen %s)\n  %s\n",
 				statusCrashStyle.Render("hash:"+truncate(c.InputHash, 16)),
 				subtleTextStyle.Render(truncate(c.StackFingerprint, 12)),
 				subtleTextStyle.Render(formatRevision(c.GitSHA, c.Dirty)),
 				subtleTextStyle.Render(c.MinimizedInput),
 				formatRelativeTime(c.LastSeen),
 				truncate(firstLine(c.Stack), 90),
-			))
+			)
 		}
 	}
 	crashBox := panelStyle.Width(max(80, m.width-4)).Render(crashB.String())
@@ -781,7 +781,7 @@ func (m Model) renderCrashesView() string {
 
 func formatRevision(sha string, dirty bool) string {
 	if sha == "" {
-		return "local"
+		return "n/a"
 	}
 	if len(sha) > 8 {
 		sha = sha[:8]
@@ -820,13 +820,17 @@ func formatRelativeTime(t time.Time) string {
 }
 
 func truncate(s string, maxLen int) string {
-	if maxLen <= 0 || len(s) <= maxLen {
+	if maxLen <= 0 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	if maxLen <= 1 {
-		return s[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return s[:maxLen-1] + "…"
+	return string(runes[:maxLen-1]) + "…"
 }
 
 func firstLine(s string) string {

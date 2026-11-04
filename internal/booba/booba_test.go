@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzzy/internal/api"
-	"github.com/NimbleTerminal/ntfuzzy/internal/store"
+	"github.com/NimbleTerminal/ntfuzz/internal/api"
+	"github.com/NimbleTerminal/ntfuzz/internal/store"
 )
 
 func TestBoobaBridgeHandler(t *testing.T) {
@@ -18,7 +18,7 @@ func TestBoobaBridgeHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	apiSrv := api.NewServer(st, nil)
 	handler, err := NewHandler(apiSrv, "http://127.0.0.1:8080", BridgeOptions{

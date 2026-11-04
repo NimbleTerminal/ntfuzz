@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzzy/internal/orchestrator"
-	"github.com/NimbleTerminal/ntfuzzy/internal/store"
+	"github.com/NimbleTerminal/ntfuzz/internal/orchestrator"
+	"github.com/NimbleTerminal/ntfuzz/internal/store"
 )
 
 // WorkerStatusProvider reports current orchestrator worker activity.
@@ -50,13 +51,6 @@ func (s *Server) routes() {
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -68,23 +62,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]Project, 0, len(rows))
 	for _, p := range rows {
-		out = append(out, Project{
-			ID:             p.ID,
-			Name:           p.Name,
-			Repo:           p.Repo,
-			Branch:         p.Branch,
-			GitSHA:         p.GitSHA,
-			Dirty:          p.Dirty,
-			SyncError:      p.SyncError,
-			LastSynced:     p.LastSynced,
-			TargetCount:    p.TargetCount,
-			TotalRuns:      p.TotalRuns,
-			OpenCrashes:    p.OpenCrashes,
-			LatestStatus:   p.LatestStatus,
-			LastRunAt:      p.LastRunAt,
-			AvgExecsPerSec: p.AvgExecsPerSec,
-			AvgCoveragePct: p.AvgCoveragePct,
-		})
+		out = append(out, ProjectFromStore(p))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -98,30 +76,7 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]Target, 0, len(rows))
 	for _, t := range rows {
-		out = append(out, Target{
-			ID:             t.ID,
-			ProjectID:      t.ProjectID,
-			ProjectName:    t.ProjectName,
-			Package:        t.Package,
-			Name:           t.Name,
-			LastRunID:      t.LastRunID,
-			LastStarted:    t.LastStarted,
-			DurationSec:    t.DurationSec,
-			Execs:          t.Execs,
-			ExecsPerSec:    t.ExecsPerSec,
-			NewInteresting: t.NewInteresting,
-			CorpusCount:    t.CorpusCount,
-			Crashes:        t.Crashes,
-			CoveragePct:    t.CoveragePct,
-			Status:         t.Status,
-			Worker:         t.Worker,
-			GitSHA:         t.GitSHA,
-			Dirty:          t.Dirty,
-			GoVersion:      t.GoVersion,
-			OpenCrashes:    t.OpenCrashes,
-			TotalRuns:      t.TotalRuns,
-			CoverageTrend:  t.CoverageTrend,
-		})
+		out = append(out, TargetFromStore(t))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -141,35 +96,16 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]Run, 0, len(rows))
 	for _, run := range rows {
-		out = append(out, Run{
-			ID:             run.ID,
-			TargetID:       run.TargetID,
-			ProjectName:    run.ProjectName,
-			Package:        run.Package,
-			TargetName:     run.TargetName,
-			Started:        run.Started,
-			DurationSec:    run.DurationSec,
-			Execs:          run.Execs,
-			ExecsPerSec:    run.ExecsPerSec,
-			NewInteresting: run.NewInteresting,
-			CorpusCount:    run.CorpusCount,
-			Crashes:        run.Crashes,
-			CoveragePct:    run.CoveragePct,
-			Status:         run.Status,
-			Worker:         run.Worker,
-			GitSHA:         run.GitSHA,
-			Dirty:          run.Dirty,
-			GoVersion:      run.GoVersion,
-		})
+		out = append(out, RunFromStore(run))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleCrashes(w http.ResponseWriter, r *http.Request) {
-	openParam := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("open")))
-	openOnly := openParam == "" || openParam == "true" || openParam == "1"
-	if openParam == "false" || openParam == "0" || openParam == "all" {
-		openOnly = false
+	openOnly, err := parseOpenParam(r.URL.Query().Get("open"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
 	}
 	target := strings.TrimSpace(r.URL.Query().Get("target"))
 	rows, err := s.store.ListCrashes(r.Context(), openOnly, target)
@@ -179,26 +115,20 @@ func (s *Server) handleCrashes(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]Crash, 0, len(rows))
 	for _, c := range rows {
-		out = append(out, Crash{
-			ID:               c.ID,
-			TargetID:         c.TargetID,
-			ProjectName:      c.ProjectName,
-			Package:          c.Package,
-			TargetName:       c.TargetName,
-			FirstSeen:        c.FirstSeen,
-			LastSeen:         c.LastSeen,
-			FixedAt:          c.FixedAt,
-			Stack:            c.Stack,
-			StackFingerprint: c.StackFingerprint,
-			InputHash:        c.InputHash,
-			MinimizedInput:   c.MinimizedInput,
-			IssueURL:         c.IssueURL,
-			GitSHA:           c.GitSHA,
-			Dirty:            c.Dirty,
-			GoVersion:        c.GoVersion,
-		})
+		out = append(out, CrashFromStore(c))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func parseOpenParam(raw string) (bool, error) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", "true", "1":
+		return true, nil
+	case "false", "0", "all":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid open parameter %q: expected true, false, or all", raw)
+	}
 }
 
 func (s *Server) handleFixCrash(w http.ResponseWriter, r *http.Request) {
@@ -211,11 +141,20 @@ func (s *Server) handleFixCrash(w http.ResponseWriter, r *http.Request) {
 
 	var req FixCrashRequest
 	if r.Body != nil {
-		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
+		dec := json.NewDecoder(io.LimitReader(r.Body, 4096))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON request body: %w", err))
+			return
+		}
 	}
 
 	if err := s.store.MarkCrashFixed(r.Context(), crashID, time.Now().UTC(), strings.TrimSpace(req.IssueURL)); err != nil {
-		writeError(w, http.StatusNotFound, err)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "fixed", "id": crashID})
@@ -240,16 +179,7 @@ func (s *Server) handleCoverageHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]CoveragePoint, 0, len(rows))
 	for _, pt := range rows {
-		out = append(out, CoveragePoint{
-			RunID:          pt.RunID,
-			TargetID:       pt.TargetID,
-			Started:        pt.Started,
-			CoveragePct:    pt.CoveragePct,
-			ExecsPerSec:    pt.ExecsPerSec,
-			NewInteresting: pt.NewInteresting,
-			CorpusCount:    pt.CorpusCount,
-			GitSHA:         pt.GitSHA,
-		})
+		out = append(out, CoveragePointFromStore(pt))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -265,17 +195,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	maxWorkers := 0
 	if s.workers != nil {
 		for _, j := range s.workers.ActiveJobs() {
-			activeJobs = append(activeJobs, ActiveJob{
-				WorkerID:  j.WorkerID,
-				Project:   j.Project,
-				Package:   j.Package,
-				Target:    j.Target,
-				FuzzTime:  j.FuzzTime,
-				GitSHA:    j.GitSHA,
-				Dirty:     j.Dirty,
-				StartedAt: j.StartedAt,
-				Status:    j.Status,
-			})
+			activeJobs = append(activeJobs, ActiveJobFromOrchestrator(j))
 		}
 		maxWorkers = s.workers.WorkerCount()
 	}

@@ -13,8 +13,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/NimbleMarkets/go-booba/serve"
 
-	"github.com/NimbleTerminal/ntfuzzy/internal/api"
-	"github.com/NimbleTerminal/ntfuzzy/internal/tui"
+	"github.com/NimbleTerminal/ntfuzz/internal/api"
+	"github.com/NimbleTerminal/ntfuzz/internal/tui"
 )
 
 //go:embed index.html

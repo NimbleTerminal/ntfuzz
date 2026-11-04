@@ -15,7 +15,7 @@ func TestStoreLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	ver, err := st.SchemaVersion(ctx)
 	if err != nil || ver != CurrentSchemaVersion {
@@ -188,3 +188,68 @@ func TestStoreLifecycle(t *testing.T) {
 		t.Fatalf("unexpected all crashes state: %+v (err=%v)", allCrashes, err)
 	}
 }
+
+func TestStorePruneOldRuns(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "prune.duckdb"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Now().UTC()
+	pID, err := st.UpsertProject(ctx, "prune-proj", "./repo", "main", &now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tID, err := st.UpsertTarget(ctx, pID, "example.com/prune", "FuzzPrune")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert 5 old runs (30 days ago) and 2 recent runs (today)
+	for i := 0; i < 5; i++ {
+		_, err := st.InsertRun(ctx, Run{
+			TargetID:    tID,
+			Started:     now.Add(-30*24*time.Hour + time.Duration(i)*time.Minute),
+			DurationSec: 1.0,
+			Execs:       100,
+			CoveragePct: float64(50 + i),
+			Status:      "ok",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		_, err := st.InsertRun(ctx, Run{
+			TargetID:    tID,
+			Started:     now.Add(-time.Duration(i) * time.Minute),
+			DurationSec: 1.0,
+			Execs:       200,
+			CoveragePct: float64(70 + i),
+			Status:      "ok",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Prune runs older than 14 days, keeping at least 3 runs per target -> should delete 4 old runs, leaving 3 total
+	deleted, err := st.PruneOldRuns(ctx, 14*24*time.Hour, 3)
+	if err != nil {
+		t.Fatalf("PruneOldRuns: %v", err)
+	}
+	if deleted != 4 {
+		t.Fatalf("expected 4 old runs pruned, got %d", deleted)
+	}
+
+	remaining, err := st.ListRuns(ctx, "FuzzPrune", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 3 {
+		t.Fatalf("expected 3 runs remaining (keepPerTarget=3), got %d", len(remaining))
+	}
+}
+

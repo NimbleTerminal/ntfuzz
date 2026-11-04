@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/NimbleTerminal/ntfuzzy/configs"
+	"github.com/NimbleTerminal/ntfuzz/configs"
 )
 
 // Config defines the YAML configuration for the ntfuzz orchestrator.
@@ -87,15 +88,23 @@ func ParseConfig(data []byte) (Config, error) {
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = filepath.Join(".ntfuzz", "repos")
 	}
-	if cfg.DefaultFuzzTime == "" {
+	if strings.TrimSpace(cfg.DefaultFuzzTime) == "" {
 		cfg.DefaultFuzzTime = "10s"
+	} else if d, err := time.ParseDuration(cfg.DefaultFuzzTime); err != nil || d <= 0 {
+		return Config{}, fmt.Errorf("invalid default_fuzztime %q: must be a positive Go duration (e.g. \"10s\")", cfg.DefaultFuzzTime)
 	}
+
 	for i, p := range cfg.Projects {
-		if p.Name == "" {
+		if strings.TrimSpace(p.Name) == "" {
 			return Config{}, fmt.Errorf("project[%d] is missing name", i)
 		}
-		if p.Repo == "" {
+		if strings.TrimSpace(p.Repo) == "" {
 			return Config{}, fmt.Errorf("project %q is missing repo", p.Name)
+		}
+		if strings.TrimSpace(p.FuzzTime) != "" {
+			if d, err := time.ParseDuration(p.FuzzTime); err != nil || d <= 0 {
+				return Config{}, fmt.Errorf("project %q has invalid fuzztime %q: must be a positive Go duration (e.g. \"10s\")", p.Name, p.FuzzTime)
+			}
 		}
 	}
 	return cfg, nil

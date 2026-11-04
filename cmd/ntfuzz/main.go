@@ -3,27 +3,25 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
 	booba "github.com/NimbleMarkets/go-booba"
 	"github.com/spf13/cobra"
 
-	"github.com/NimbleTerminal/ntfuzzy/internal/api"
-	boobabridge "github.com/NimbleTerminal/ntfuzzy/internal/booba"
-	"github.com/NimbleTerminal/ntfuzzy/internal/orchestrator"
-	"github.com/NimbleTerminal/ntfuzzy/internal/store"
-	"github.com/NimbleTerminal/ntfuzzy/internal/tui"
+	"github.com/NimbleTerminal/ntfuzz/internal/api"
+	boobabridge "github.com/NimbleTerminal/ntfuzz/internal/booba"
+	"github.com/NimbleTerminal/ntfuzz/internal/orchestrator"
+	"github.com/NimbleTerminal/ntfuzz/internal/store"
+	"github.com/NimbleTerminal/ntfuzz/internal/tui"
 )
 
 func main() {
-	log.SetOutput(os.Stderr)
-	log.SetFlags(log.LstdFlags)
-
 	rootCmd := &cobra.Command{
 		Use:          "ntfuzz",
 		Short:        "Continuous Go fuzzing orchestrator with DuckDB store and Booba/Bubble Tea TUI",
@@ -55,6 +53,8 @@ func newServeCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
+			logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
 			cfg, err := orchestrator.LoadConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
@@ -69,13 +69,18 @@ func newServeCmd() *cobra.Command {
 			orch := orchestrator.New(cfg, st, orchestrator.Options{
 				Workers:       workers,
 				RoundInterval: roundInterval,
-				Logger:        log.New(os.Stderr, "", log.LstdFlags),
+				Logger:        logger,
 			})
 
+			var orchWG sync.WaitGroup
+			defer orchWG.Wait()
+
 			if !noOrchestrator {
+				orchWG.Add(1)
 				go func() {
+					defer orchWG.Done()
 					if err := orch.Run(ctx); err != nil {
-						log.Printf("level=ERROR component=serve msg=%q err=%q", "orchestrator exited with error", err)
+						logger.Error("orchestrator exited with error", "component", "serve", "err", err)
 					}
 				}()
 			} else {
@@ -83,9 +88,14 @@ func newServeCmd() *cobra.Command {
 			}
 
 			apiServer := api.NewServer(st, orch)
-			log.Printf("level=INFO component=serve listen=%s db=%s projects=%d workers=%d msg=%q",
-				listenAddr, dbPath, len(cfg.Projects), workers,
-				fmt.Sprintf("serving HTTP API (/api/*) and Booba Ghostty TUI (http://%s/)", listenAddr))
+			logger.Info("serving HTTP API (/api/*) and Booba Ghostty TUI",
+				"component", "serve",
+				"listen", listenAddr,
+				"url", fmt.Sprintf("http://%s/", listenAddr),
+				"db", dbPath,
+				"projects", len(cfg.Projects),
+				"workers", workers,
+			)
 
 			return boobabridge.ListenAndServe(ctx, apiServer, boobabridge.BridgeOptions{
 				ListenAddr:      listenAddr,
@@ -125,7 +135,7 @@ func newTUICmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&apiURL, "api", "http://localhost:8080", "Base URL of the ntfuzz HTTP API")
+	cmd.Flags().StringVar(&apiURL, "api", "http://127.0.0.1:8080", "Base URL of the ntfuzz HTTP API")
 	cmd.Flags().DurationVar(&refresh, "refresh", 2*time.Second, "Dashboard polling interval")
 
 	return cmd
@@ -138,7 +148,7 @@ func newCrashCmd() *cobra.Command {
 		Use:   "crash",
 		Short: "List or triage recorded fuzzing crashes via the HTTP API",
 	}
-	crashCmd.PersistentFlags().StringVar(&apiURL, "api", "http://localhost:8080", "Base URL of the ntfuzz HTTP API")
+	crashCmd.PersistentFlags().StringVar(&apiURL, "api", "http://127.0.0.1:8080", "Base URL of the ntfuzz HTTP API")
 
 	var openOnly bool
 	listCmd := &cobra.Command{
