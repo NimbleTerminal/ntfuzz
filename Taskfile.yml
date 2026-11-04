@@ -33,6 +33,13 @@ tasks:
     cmds:
       - golangci-lint run ./...
 
+  ci:
+    desc: Run full CI check suite (build, test, lint)
+    cmds:
+      - task: build
+      - task: test
+      - task: lint
+
   serve:
     desc: Build and run ntfuzz serve (orchestrator + DuckDB + HTTP API + Booba web TUI)
     deps: [build]
