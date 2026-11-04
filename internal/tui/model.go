@@ -1,0 +1,760 @@
+package tui
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/table"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/NimbleMarkets/go-booba/actions"
+	"github.com/NimbleMarkets/go-booba/actions/bubblehelp"
+	"github.com/NimbleMarkets/ntcharts/v2/sparkline"
+
+	"github.com/NimbleTerminal/ntfuzzy/internal/api"
+	"github.com/NimbleTerminal/ntfuzzy/internal/store"
+)
+
+type tickMsg time.Time
+
+type fleetDataMsg struct {
+	status   api.StatusResponse
+	projects []store.Project
+	targets  []store.Target
+	crashes  []store.Crash
+	err      error
+}
+
+type detailDataMsg struct {
+	targetID int64
+	runs     []store.Run
+	crashes  []store.Crash
+	history  []store.CoveragePoint
+	err      error
+}
+
+// Model is the shared Bubble Tea dashboard model for ntfuzz.
+// It communicates exclusively via the HTTP API client.
+type Model struct {
+	client          *api.Client
+	refreshInterval time.Duration
+
+	width    int
+	height   int
+	mode     ViewMode
+	hideHelp bool
+	help     help.Model
+
+	// Fleet state
+	status        api.StatusResponse
+	projects      []store.Project
+	targets       []store.Target
+	openCrashes   []store.Crash
+	projectIdx    int // 0 = All Projects, 1..N = projects[projectIdx-1]
+	selectedIdx   int
+	crashIdx      int
+	lastUpdated   time.Time
+	lastErr       error
+	loading       bool
+
+	// Target Detail state
+	detailTarget  *store.Target
+	detailRuns    []store.Run
+	detailCrashes []store.Crash
+	detailHistory []store.CoveragePoint
+	runsTable     table.Model
+	covSparkline  sparkline.Model
+}
+
+// NewModel constructs a pure Bubble Tea Model backed by the HTTP API client.
+func NewModel(client *api.Client, refreshInterval time.Duration) Model {
+	if refreshInterval <= 0 {
+		refreshInterval = 2 * time.Second
+	}
+
+	cols := []table.Column{
+		{Title: "Run ID", Width: 8},
+		{Title: "Started", Width: 19},
+		{Title: "Dur", Width: 7},
+		{Title: "Execs", Width: 10},
+		{Title: "Rate", Width: 10},
+		{Title: "+Corp", Width: 6},
+		{Title: "Cov %", Width: 8},
+		{Title: "Status", Width: 8},
+		{Title: "Worker", Width: 10},
+	}
+	rt := table.New(
+		table.WithColumns(cols),
+		table.WithFocused(true),
+		table.WithHeight(8),
+	)
+	ts := table.DefaultStyles()
+	ts.Header = ts.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(colorBorder).
+		BorderBottom(true).
+		Bold(true).
+		Foreground(colorAccent)
+	ts.Selected = ts.Selected.
+		Foreground(lipgloss.Color("#ffffff")).
+		Background(lipgloss.Color("#1e3a5f")).
+		Bold(true)
+	rt.SetStyles(ts)
+
+	sp := sparkline.New(36, 3, sparkline.WithStyle(lipgloss.NewStyle().Foreground(colorGreen)))
+
+	h := help.New()
+	h.SetWidth(100)
+
+	return Model{
+		client:          client,
+		refreshInterval: refreshInterval,
+		width:           110,
+		height:          32,
+		mode:            ViewFleet,
+		help:            h,
+		loading:         true,
+		runsTable:       rt,
+		covSparkline:    sp,
+	}
+}
+
+// NewActionModel wraps Model with go-booba's bubblehelp adapter so keybindings
+// are published as OSC 7501 Booba Terminal Actions.
+func NewActionModel(client *api.Client, refreshInterval time.Duration) (tea.Model, error) {
+	base := NewModel(client, refreshInterval)
+	return bubblehelp.NewModelWithFallback(base, DescribeActions, bubblehelp.ModelOptions{
+		Adapter: bubblehelp.Options{
+			Customize: func(b key.Binding, a *actions.Action) error {
+				if len(a.Keys) > 1 {
+					pref := 0
+					a.Preferred = &pref
+				}
+				return nil
+			},
+		},
+	})
+}
+
+// DescribeActions maps the current TUI state to a Booba Terminal Actions description.
+func DescribeActions(inner tea.Model) bubblehelp.Description {
+	m, ok := inner.(Model)
+	if !ok {
+		return bubblehelp.Description{
+			Context: "fleet",
+			Keys:    NewKeyMap(ViewFleet, false),
+			Status:  actions.ProgramStatus{App: "ntfuzz", State: "idle", Summary: "ntfuzz dashboard"},
+		}
+	}
+
+	km := NewKeyMap(m.mode, m.hideHelp)
+	state := "idle"
+	if m.status.ActiveWorkers > 0 {
+		state = "working"
+	}
+	summary := fmt.Sprintf("Fleet: %d projects, %d targets, %d open crashes",
+		m.status.TotalProjects, m.status.TotalTargets, m.status.OpenCrashes)
+	if m.mode == ViewDetail && m.detailTarget != nil {
+		summary = fmt.Sprintf("Target %s/%s (%.1f%% cov)", m.detailTarget.ProjectName, m.detailTarget.Name, m.detailTarget.CoveragePct)
+	} else if m.mode == ViewCrashes {
+		summary = fmt.Sprintf("Open Crashes (%d)", len(m.openCrashes))
+	}
+
+	return bubblehelp.Description{
+		Context: m.mode.ContextName(),
+		Keys:    km,
+		Status: actions.ProgramStatus{
+			App:     "ntfuzz",
+			State:   state,
+			Summary: summary,
+		},
+	}
+}
+
+// Init implements tea.Model.
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(
+		m.fetchFleetCmd(),
+		m.tickCmd(),
+	)
+}
+
+func (m Model) tickCmd() tea.Cmd {
+	d := m.refreshInterval
+	return tea.Tick(d, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+func (m Model) currentProjectFilter() string {
+	if m.projectIdx <= 0 || m.projectIdx > len(m.projects) {
+		return ""
+	}
+	return m.projects[m.projectIdx-1].Name
+}
+
+func (m Model) fetchFleetCmd() tea.Cmd {
+	client := m.client
+	projFilter := m.currentProjectFilter()
+	return func() tea.Msg {
+		if client == nil {
+			return fleetDataMsg{}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+
+		status, err := client.GetStatus(ctx)
+		if err != nil {
+			return fleetDataMsg{err: err}
+		}
+		projects, err := client.GetProjects(ctx)
+		if err != nil {
+			return fleetDataMsg{err: err}
+		}
+		targets, err := client.GetTargets(ctx, projFilter)
+		if err != nil {
+			return fleetDataMsg{err: err}
+		}
+		crashes, err := client.GetCrashes(ctx, true, "")
+		if err != nil {
+			return fleetDataMsg{err: err}
+		}
+		return fleetDataMsg{
+			status:   status,
+			projects: projects,
+			targets:  targets,
+			crashes:  crashes,
+		}
+	}
+}
+
+func (m Model) fetchDetailCmd(targetID int64) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		if client == nil {
+			return detailDataMsg{targetID: targetID}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+
+		idStr := strconv.FormatInt(targetID, 10)
+		runs, err := client.GetRuns(ctx, idStr, 50)
+		if err != nil {
+			return detailDataMsg{targetID: targetID, err: err}
+		}
+		crashes, err := client.GetCrashes(ctx, true, idStr)
+		if err != nil {
+			return detailDataMsg{targetID: targetID, err: err}
+		}
+		history, err := client.GetCoverageHistory(ctx, idStr)
+		if err != nil {
+			return detailDataMsg{targetID: targetID, err: err}
+		}
+		return detailDataMsg{
+			targetID: targetID,
+			runs:     runs,
+			crashes:  crashes,
+			history:  history,
+		}
+	}
+}
+
+// Update implements tea.Model.
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		if msg.Width > 0 {
+			m.width = msg.Width
+			m.help.SetWidth(msg.Width - 4)
+		}
+		if msg.Height > 0 {
+			m.height = msg.Height
+			tableH := max(4, min(12, msg.Height-20))
+			m.runsTable.SetHeight(tableH)
+		}
+		return m, nil
+
+	case tickMsg:
+		cmds := []tea.Cmd{m.tickCmd(), m.fetchFleetCmd()}
+		if m.mode == ViewDetail && m.detailTarget != nil {
+			cmds = append(cmds, m.fetchDetailCmd(m.detailTarget.ID))
+		}
+		return m, tea.Batch(cmds...)
+
+	case fleetDataMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.lastErr = msg.err
+			return m, nil
+		}
+		m.lastErr = nil
+		m.status = msg.status
+		m.projects = msg.projects
+		m.targets = msg.targets
+		m.openCrashes = msg.crashes
+		m.lastUpdated = time.Now()
+
+		if m.projectIdx > len(m.projects) {
+			m.projectIdx = 0
+		}
+		if len(m.targets) == 0 {
+			m.selectedIdx = 0
+		} else if m.selectedIdx >= len(m.targets) {
+			m.selectedIdx = len(m.targets) - 1
+		}
+		if len(m.openCrashes) == 0 {
+			m.crashIdx = 0
+		} else if m.crashIdx >= len(m.openCrashes) {
+			m.crashIdx = len(m.openCrashes) - 1
+		}
+		if m.detailTarget != nil {
+			for i := range m.targets {
+				if m.targets[i].ID == m.detailTarget.ID {
+					tCopy := m.targets[i]
+					m.detailTarget = &tCopy
+					break
+				}
+			}
+		}
+		return m, nil
+
+	case detailDataMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err
+			return m, nil
+		}
+		if m.detailTarget == nil || m.detailTarget.ID != msg.targetID {
+			return m, nil
+		}
+		m.lastErr = nil
+		m.detailRuns = msg.runs
+		m.detailCrashes = msg.crashes
+		m.detailHistory = msg.history
+		m.syncDetailWidgets()
+		return m, nil
+
+	case tea.KeyPressMsg:
+		km := NewKeyMap(m.mode, m.hideHelp)
+		switch {
+		case key.Matches(msg, km.Quit):
+			return m, tea.Quit
+
+		case key.Matches(msg, km.Visibility):
+			m.hideHelp = !m.hideHelp
+			return m, nil
+
+		case key.Matches(msg, km.More):
+			m.hideHelp = false
+			m.help.ShowAll = !m.help.ShowAll
+			return m, nil
+
+		case key.Matches(msg, km.Refresh):
+			cmds := []tea.Cmd{m.fetchFleetCmd()}
+			if m.mode == ViewDetail && m.detailTarget != nil {
+				cmds = append(cmds, m.fetchDetailCmd(m.detailTarget.ID))
+			}
+			return m, tea.Batch(cmds...)
+
+		case key.Matches(msg, km.Crashes):
+			if m.mode == ViewCrashes {
+				m.mode = ViewFleet
+			} else {
+				m.mode = ViewCrashes
+			}
+			return m, nil
+
+		case key.Matches(msg, km.Back):
+			if m.mode != ViewFleet {
+				m.mode = ViewFleet
+				return m, nil
+			}
+
+		case key.Matches(msg, km.Project):
+			if m.mode == ViewFleet {
+				if len(m.projects) > 0 {
+					m.projectIdx = (m.projectIdx + 1) % (len(m.projects) + 1)
+				} else {
+					m.projectIdx = 0
+				}
+				m.selectedIdx = 0
+				return m, m.fetchFleetCmd()
+			}
+
+		case key.Matches(msg, km.Enter):
+			if m.mode == ViewFleet && len(m.targets) > 0 && m.selectedIdx < len(m.targets) {
+				selected := m.targets[m.selectedIdx]
+				m.detailTarget = &selected
+				m.mode = ViewDetail
+				m.detailRuns = nil
+				m.detailCrashes = nil
+				m.detailHistory = nil
+				return m, m.fetchDetailCmd(selected.ID)
+			}
+
+		case key.Matches(msg, km.Up):
+			switch m.mode {
+			case ViewFleet:
+				if m.selectedIdx > 0 {
+					m.selectedIdx--
+				}
+			case ViewCrashes:
+				if m.crashIdx > 0 {
+					m.crashIdx--
+				}
+			case ViewDetail:
+				var cmd tea.Cmd
+				m.runsTable, cmd = m.runsTable.Update(msg)
+				return m, cmd
+			}
+			return m, nil
+
+		case key.Matches(msg, km.Down):
+			switch m.mode {
+			case ViewFleet:
+				if m.selectedIdx < len(m.targets)-1 {
+					m.selectedIdx++
+				}
+			case ViewCrashes:
+				if m.crashIdx < len(m.openCrashes)-1 {
+					m.crashIdx++
+				}
+			case ViewDetail:
+				var cmd tea.Cmd
+				m.runsTable, cmd = m.runsTable.Update(msg)
+				return m, cmd
+			}
+			return m, nil
+		}
+	}
+
+	if m.mode == ViewDetail {
+		var cmd tea.Cmd
+		m.runsTable, cmd = m.runsTable.Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m *Model) syncDetailWidgets() {
+	rows := make([]table.Row, 0, len(m.detailRuns))
+	for _, r := range m.detailRuns {
+		rows = append(rows, table.Row{
+			fmt.Sprintf("#%d", r.ID),
+			r.Started.Local().Format("01-02 15:04:05"),
+			fmt.Sprintf("%.1fs", r.DurationSec),
+			fmt.Sprintf("%d", r.Execs),
+			FormatExecRate(r.ExecsPerSec),
+			fmt.Sprintf("+%d", r.NewInteresting),
+			fmt.Sprintf("%.1f%%", r.CoveragePct),
+			strings.ToUpper(r.Status),
+			r.Worker,
+		})
+	}
+	m.runsTable.SetRows(rows)
+
+	m.covSparkline.Clear()
+	for _, pt := range m.detailHistory {
+		m.covSparkline.Push(pt.CoveragePct)
+	}
+	m.covSparkline.DrawBraille()
+}
+
+// View implements tea.Model.
+func (m Model) View() tea.View {
+	var b strings.Builder
+
+	b.WriteString(m.renderHeader())
+	b.WriteString("\n")
+	b.WriteString(m.renderOverviewCards())
+	b.WriteString("\n")
+
+	if m.lastErr != nil {
+		b.WriteString(errorBannerStyle.Render(fmt.Sprintf("  ⚠ API connection warning: %v", m.lastErr)))
+		b.WriteString("\n")
+	}
+
+	switch m.mode {
+	case ViewDetail:
+		b.WriteString(m.renderDetailView())
+	case ViewCrashes:
+		b.WriteString(m.renderCrashesView())
+	default:
+		b.WriteString(m.renderFleetView())
+	}
+
+	if !m.hideHelp {
+		b.WriteString("\n")
+		b.WriteString(m.help.View(NewKeyMap(m.mode, m.hideHelp)))
+	}
+
+	v := tea.NewView(b.String())
+	v.AltScreen = true
+	return v
+}
+
+func (m Model) renderHeader() string {
+	apiURL := "http://localhost:8080"
+	if m.client != nil {
+		apiURL = m.client.BaseURL()
+	}
+	title := titleStyle.Render(" NTFUZZ ")
+	sub := subtitleStyle.Render(fmt.Sprintf("Continuous Go Fuzzing Orchestrator • API %s", apiURL))
+	if !m.lastUpdated.IsZero() {
+		sub += subtleTextStyle.Render(fmt.Sprintf(" • synced %s", m.lastUpdated.Format("15:04:05")))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Center, title, sub)
+}
+
+func (m Model) renderOverviewCards() string {
+	crashVal := statusOKStyle.Render("0")
+	if m.status.OpenCrashes > 0 {
+		crashVal = statusCrashStyle.Render(strconv.Itoa(m.status.OpenCrashes))
+	}
+
+	runsVal := cardValueStyle.Render(fmt.Sprintf("%d", m.status.RunsLast24h))
+	runsSub := subtleTextStyle.Render(fmt.Sprintf(" (%s avg)", FormatExecRate(m.status.AvgExecsSec)))
+
+	workerState := fmt.Sprintf("%d / %d", m.status.ActiveWorkers, max(m.status.MaxWorkers, m.status.ActiveWorkers))
+	workerVal := cardValueStyle.Render(workerState)
+	if m.status.ActiveWorkers > 0 {
+		workerVal = statusRunningStyle.Render("⚡ " + workerState)
+	}
+
+	fleetVal := RenderStatusBadge(m.status.FleetHealth, m.status.ActiveWorkers > 0)
+
+	c1 := cardStyle.Render(cardTitleStyle.Render("Fleet Status") + "\n" + fleetVal)
+	c2 := cardStyle.Render(cardTitleStyle.Render("Open Crashes") + "\n" + crashVal)
+	c3 := cardStyle.Render(cardTitleStyle.Render("Runs (24h)") + "\n" + runsVal + runsSub)
+	c4 := cardStyle.Render(cardTitleStyle.Render("Active Workers") + "\n" + workerVal)
+	c5 := cardStyle.Render(cardTitleStyle.Render("Projects / Targets") + "\n" +
+		cardValueStyle.Render(fmt.Sprintf("%d / %d", m.status.TotalProjects, m.status.TotalTargets)))
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, c1, c2, c3, c4, c5)
+}
+
+func (m Model) renderFleetView() string {
+	var b strings.Builder
+
+	// Project Filter Tabs
+	filterTabs := []string{}
+	allLabel := "All Projects"
+	if m.projectIdx == 0 {
+		filterTabs = append(filterTabs, titleStyle.Render(allLabel))
+	} else {
+		filterTabs = append(filterTabs, subtleTextStyle.Render("["+allLabel+"]"))
+	}
+	for i, p := range m.projects {
+		lbl := fmt.Sprintf("%s (%d)", p.Name, p.TargetCount)
+		if p.OpenCrashes > 0 {
+			lbl += fmt.Sprintf(" ✖%d", p.OpenCrashes)
+		}
+		if m.projectIdx == i+1 {
+			filterTabs = append(filterTabs, titleStyle.Render(lbl))
+		} else {
+			filterTabs = append(filterTabs, subtleTextStyle.Render("["+lbl+"]"))
+		}
+	}
+	b.WriteString("Filter: " + strings.Join(filterTabs, "  ") + "\n\n")
+
+	// Targets Table Header
+	hdr := fmt.Sprintf("  %-8s  %-16s  %-22s  %-12s  %-10s  %-7s  %-10s  %-7s",
+		"STATUS", "PROJECT", "TARGET", "LAST RUN", "EXECS/SEC", "COV %", "TREND", "CRASHES")
+	b.WriteString(headerRowStyle.Render(hdr) + "\n")
+
+	if len(m.targets) == 0 {
+		if m.loading {
+			b.WriteString(subtleTextStyle.Render("\n  Loading targets from API...\n"))
+		} else {
+			b.WriteString(subtleTextStyle.Render("\n  No fuzz targets discovered yet. Waiting for orchestrator sync...\n"))
+		}
+	} else {
+		activeMap := map[string]bool{}
+		for _, job := range m.status.ActiveJobs {
+			activeMap[job.Project+"/"+job.Target] = true
+		}
+
+		maxRows := max(6, m.height-16)
+		start := 0
+		if m.selectedIdx >= maxRows {
+			start = m.selectedIdx - maxRows + 1
+		}
+		end := min(len(m.targets), start+maxRows)
+
+		for i := start; i < end; i++ {
+			t := m.targets[i]
+			cursor := "  "
+			if i == m.selectedIdx {
+				cursor = "▸ "
+			}
+			isRunning := activeMap[t.ProjectName+"/"+t.Name]
+			badge := RenderStatusBadge(t.Status, isRunning)
+
+			lastRun := "never"
+			if t.LastStarted != nil {
+				lastRun = formatRelativeTime(*t.LastStarted)
+			}
+
+			crashCell := subtleTextStyle.Render("-")
+			if t.OpenCrashes > 0 {
+				crashCell = statusCrashStyle.Render(fmt.Sprintf("✖ %d", t.OpenCrashes))
+			}
+
+			trend := RenderCoverageTrend(t.CoverageTrend, 8)
+
+			rowStr := fmt.Sprintf("%s%-8s  %-16s  %-22s  %-12s  %-10s  %6.1f%%  %-10s  %s",
+				cursor,
+				badge,
+				truncate(t.ProjectName, 16),
+				truncate(t.Name, 22),
+				lastRun,
+				FormatExecRate(t.ExecsPerSec),
+				t.CoveragePct,
+				trend,
+				crashCell,
+			)
+			if i == m.selectedIdx {
+				b.WriteString(selectedRowStyle.Render(rowStr) + "\n")
+			} else {
+				b.WriteString(normalRowStyle.Render(rowStr) + "\n")
+			}
+		}
+	}
+
+	// Active Workers Strip
+	if len(m.status.ActiveJobs) > 0 {
+		var jobs []string
+		for _, j := range m.status.ActiveJobs {
+			jobs = append(jobs, fmt.Sprintf("[%s] %s/%s (%s)", j.WorkerID, j.Project, j.Target, j.FuzzTime))
+		}
+		b.WriteString("\n" + statusRunningStyle.Render("Active Jobs: ") + strings.Join(jobs, "  •  ") + "\n")
+	}
+
+	return panelStyle.Width(max(80, m.width-2)).Render(b.String())
+}
+
+func (m Model) renderDetailView() string {
+	if m.detailTarget == nil {
+		return panelStyle.Render("No target selected.")
+	}
+	t := m.detailTarget
+
+	var top strings.Builder
+	top.WriteString(fmt.Sprintf("Target: %s  •  Project: %s  •  Package: %s\n",
+		cardValueStyle.Render(t.Name),
+		cardValueStyle.Render(t.ProjectName),
+		subtleTextStyle.Render(t.Package),
+	))
+	top.WriteString(fmt.Sprintf("Status: %s  •  Latest Rate: %s  •  Coverage: %.1f%%  •  Trend: %s  •  Total Runs: %d  •  Open Crashes: %d\n",
+		RenderStatusBadge(t.Status, false),
+		cardValueStyle.Render(FormatExecRate(t.ExecsPerSec)),
+		t.CoveragePct,
+		RenderCoverageTrend(t.CoverageTrend, 10),
+		t.TotalRuns,
+		t.OpenCrashes,
+	))
+
+	// Sparkline + Recent Runs
+	sparkBox := panelStyle.Render(
+		cardTitleStyle.Render("Coverage Sparkline (ntcharts)") + "\n" + m.covSparkline.View(),
+	)
+
+	runsBox := activePanelStyle.Render(
+		cardTitleStyle.Render(fmt.Sprintf("Recent Runs (%d)", len(m.detailRuns))) + "\n" + m.runsTable.View(),
+	)
+
+	var crashB strings.Builder
+	crashB.WriteString(cardTitleStyle.Render(fmt.Sprintf("Open Crashes (%d)", len(m.detailCrashes))) + "\n")
+	if len(m.detailCrashes) == 0 {
+		crashB.WriteString(statusOKStyle.Render("✓ No open crashes for this target."))
+	} else {
+		for idx, c := range m.detailCrashes {
+			if idx >= 3 {
+				crashB.WriteString(subtleTextStyle.Render(fmt.Sprintf("\n...and %d more open crashes", len(m.detailCrashes)-3)))
+				break
+			}
+			crashB.WriteString(fmt.Sprintf("• %s  artifact: %s  (last seen %s)\n  %s\n",
+				statusCrashStyle.Render("hash:"+truncate(c.InputHash, 16)),
+				subtleTextStyle.Render(c.MinimizedInput),
+				formatRelativeTime(c.LastSeen),
+				truncate(firstLine(c.Stack), 90),
+			))
+		}
+	}
+	crashBox := panelStyle.Width(max(80, m.width-4)).Render(crashB.String())
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		panelStyle.Width(max(80, m.width-4)).Render(top.String()),
+		lipgloss.JoinHorizontal(lipgloss.Top, runsBox, sparkBox),
+		crashBox,
+	)
+}
+
+func (m Model) renderCrashesView() string {
+	var b strings.Builder
+	b.WriteString(headerRowStyle.Render(fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d)", len(m.openCrashes))) + "\n\n")
+
+	if len(m.openCrashes) == 0 {
+		b.WriteString(statusOKStyle.Render("  ✓ Zero open crashes across the fleet.\n"))
+		return panelStyle.Width(max(80, m.width-2)).Render(b.String())
+	}
+
+	for i, c := range m.openCrashes {
+		cursor := "  "
+		if i == m.crashIdx {
+			cursor = "▸ "
+		}
+		line := fmt.Sprintf("%s[id:%d] %s/%s  hash:%s  seen:%s  input:%s",
+			cursor, c.ID, c.ProjectName, c.TargetName, truncate(c.InputHash, 14),
+			formatRelativeTime(c.LastSeen), c.MinimizedInput)
+		if i == m.crashIdx {
+			b.WriteString(selectedRowStyle.Render(line) + "\n")
+			b.WriteString(subtleTextStyle.Render("    Stack: "+firstLine(c.Stack)) + "\n")
+		} else {
+			b.WriteString(normalRowStyle.Render(line) + "\n")
+		}
+	}
+	return panelStyle.Width(max(80, m.width-2)).Render(b.String())
+}
+
+func formatRelativeTime(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	d := time.Since(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return t.Local().Format("2006-01-02")
+	}
+}
+
+func truncate(s string, maxLen int) string {
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 1 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-1] + "…"
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return s
+}

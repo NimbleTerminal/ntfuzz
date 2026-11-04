@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>ntfuzz · Continuous Go Fuzzing Dashboard</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #10151d;
+            color: #e4edf7;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+            overflow: hidden;
+            background: #10151d;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+        }
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 14px;
+            background: #161f2c;
+            border-bottom: 1px solid #2d3f56;
+            font-size: 13px;
+        }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+            color: #38bdf8;
+        }
+        .brand-sub {
+            color: #94a3b8;
+            font-weight: 400;
+            font-family: ui-monospace, monospace;
+            font-size: 12px;
+        }
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-family: ui-monospace, monospace;
+            font-size: 12px;
+            color: #94a3b8;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #64748b;
+            transition: background-color 0.25s;
+        }
+        .status-dot.connected { background: #22c55e; }
+        .status-dot.disconnected { background: #ef4444; }
+        .status-dot.connecting, .status-dot.reconnecting { background: #eab308; }
+        #terminal-container {
+            flex: 1;
+            min-height: 0;
+            padding: 6px;
+            background: var(--booba-background, #10151d);
+            overflow: hidden;
+        }
+        #action-controls {
+            background: #161f2c;
+            border-top: 1px solid #2d3f56;
+            padding: 6px 12px;
+        }
+        .booba-action {
+            min-height: 34px;
+        }
+        .booba-action--keyboard {
+            margin-inline-start: auto;
+        }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span>NTFUZZ</span>
+            <span class="brand-sub" id="program-summary">Ghostty / Booba Live TUI</span>
+        </div>
+        <div class="status">
+            <span class="status-dot connecting" id="status-dot"></span>
+            <span id="status-text">Connecting...</span>
+        </div>
+    </header>
+    <div id="terminal-container" aria-label="ntfuzz live terminal"></div>
+    <div id="action-controls"></div>
+
+    <script type="module">
+        import { BoobaTerminal, installActionBar, resolveBoobaURLs } from './static/booba/booba.js';
+        import { installRendererHud, parseRendererFromURL } from './static/ntwebterm/ntwebterm.js';
+
+        const dot = document.getElementById('status-dot');
+        const text = document.getElementById('status-text');
+        const summaryEl = document.getElementById('program-summary');
+
+        async function main() {
+            const booba = new BoobaTerminal('terminal-container', {
+                fontSize: 14,
+                allowOSC7501Actions: true,
+                renderer: parseRendererFromURL(),
+                theme: {
+                    background: '#10151d',
+                    foreground: '#e2e8f0',
+                },
+            });
+
+            booba.onStatusChange = (state, message) => {
+                dot.className = `status-dot ${state}`;
+                text.textContent = message || state;
+            };
+
+            booba.onTitleChange = (title) => {
+                document.title = title || 'ntfuzz';
+            };
+
+            booba.onProgramStatus = (report) => {
+                if (report && report.message) {
+                    summaryEl.textContent = report.message;
+                }
+            };
+
+            await booba.init();
+
+            booba.setActionKeyEncoder({
+                canEncode: gesture => booba.encodeKey(gesture) !== null,
+                encode: gesture => booba.encodeKey(gesture),
+            });
+
+            installActionBar(booba.actions, {
+                parent: document.getElementById('action-controls'),
+                openKeyboard: () => booba.focus(),
+                onLayout: () => booba.fitAddon?.fit(),
+            });
+
+            installRendererHud(booba.terminal);
+
+            const urls = resolveBoobaURLs(document.baseURI);
+            booba.connectWebSocket(urls.wsUrl);
+            booba.focus();
+
+            window.addEventListener('pagehide', () => booba.dispose(), { once: true });
+        }
+
+        main().catch(err => {
+            dot.className = 'status-dot disconnected';
+            text.textContent = String(err);
+            console.error(err);
+        });
+    </script>
+</body>
+</html>
