@@ -343,14 +343,36 @@ func persistCrashInput(srcPath, crashStoreDir string, removeOriginal bool) (stri
 }
 
 // measureCorpusCoverage replays the cached fuzz corpus entries in an isolated temporary copy of the module
-// so that the user's repository is never modified on disk.
+// so that the user's repository is never modified on disk. Sibling directories in the parent workspace are
+// symlinked into the temporary workspace root so relative go.mod replace directives (e.g. ../sibling) resolve.
 func measureCorpusCoverage(ctx context.Context, moduleDir, pkgArg, exactPattern, targetName, cacheTargetDir string) (float64, bool, error) {
-	tmpModDir, err := os.MkdirTemp("", "ntfuzz-cov-*")
+	tmpRoot, err := os.MkdirTemp("", "ntfuzz-cov-*")
 	if err != nil {
 		return 0, false, err
 	}
-	defer func() { _ = os.RemoveAll(tmpModDir) }()
+	defer func() { _ = os.RemoveAll(tmpRoot) }()
 
+	absMod, absErr := filepath.Abs(moduleDir)
+	if absErr == nil {
+		moduleDir = absMod
+	}
+	modBase := filepath.Base(moduleDir)
+	parentDir := filepath.Dir(moduleDir)
+
+	if siblings, readErr := os.ReadDir(parentDir); readErr == nil {
+		for _, sib := range siblings {
+			name := sib.Name()
+			if name == modBase || strings.HasPrefix(name, ".") {
+				continue
+			}
+			_ = os.Symlink(filepath.Join(parentDir, name), filepath.Join(tmpRoot, name))
+		}
+	}
+
+	tmpModDir := filepath.Join(tmpRoot, modBase)
+	if err := os.MkdirAll(tmpModDir, 0o755); err != nil {
+		return 0, false, err
+	}
 	if err := copyModuleTree(moduleDir, tmpModDir); err != nil {
 		return 0, false, err
 	}
@@ -406,7 +428,7 @@ func copyModuleTree(srcRoot, dstRoot string) error {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".git" || name == ".ntfuzz" || name == "node_modules" {
+			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" {
 				return filepath.SkipDir
 			}
 			return os.MkdirAll(filepath.Join(dstRoot, rel), 0o755)

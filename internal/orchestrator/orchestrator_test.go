@@ -81,6 +81,14 @@ projects:
 			}
 		})
 	}
+
+	cfg, err := LoadConfig("../../configs/projects.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig(../../configs/projects.yaml) failed: %v", err)
+	}
+	if len(cfg.Projects) == 0 {
+		t.Fatalf("LoadConfig(../../configs/projects.yaml) returned 0 projects")
+	}
 }
 
 func TestParseFuzzOutput(t *testing.T) {
