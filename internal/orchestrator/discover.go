@@ -5,62 +5,88 @@ import (
 	"context"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
 
+// CheckoutInfo holds the local path and revision state of a synced repository.
+type CheckoutInfo struct {
+	RepoDir   string
+	GitSHA    string
+	Dirty     bool
+	GoVersion string
+}
+
 // DiscoveredTarget represents a Go fuzz target function discovered in a repository.
 type DiscoveredTarget struct {
+	ModuleDir     string // Directory containing the nearest ancestor go.mod
 	PackageImport string // e.g. "example.com/demo/parser"
-	PackageRelDir string // e.g. "." or "./subpkg"
+	PackageRelDir string // Relative to ModuleDir, e.g. "." or "./subpkg"
 	FuncName      string // e.g. "FuzzParseExpr"
 }
 
-// EnsureCheckout ensures the project repository is available locally and returns its directory path.
-// If proj.Repo points to an existing local directory, it is used directly.
-// Otherwise, it clones or pulls the Git repository into workDir/<proj.Name>.
-func EnsureCheckout(ctx context.Context, proj ProjectConfig, workDir string) (string, error) {
+// EnsureCheckout ensures the project repository is available locally and returns its directory and git revision metadata.
+// If a remote git pull fails, it returns the current CheckoutInfo along with a non-nil error so callers can surface
+// the failure without advancing last_synced.
+func EnsureCheckout(ctx context.Context, proj ProjectConfig, workDir string) (CheckoutInfo, error) {
+	goVer := detectGoVersion(ctx)
 	repo := strings.TrimSpace(proj.Repo)
+
 	if info, err := os.Stat(repo); err == nil && info.IsDir() {
 		abs, err := filepath.Abs(repo)
 		if err != nil {
-			return repo, nil
+			abs = repo
 		}
-		// If it's a git repo and branch is specified or remote exists, we leave local checkouts untouched
-		// so local uncommitted fuzz targets aren't overwritten.
-		return abs, nil
+		sha, dirty := inspectGitRevision(ctx, abs)
+		return CheckoutInfo{
+			RepoDir:   abs,
+			GitSHA:    sha,
+			Dirty:     dirty,
+			GoVersion: goVer,
+		}, nil
 	}
 
 	if workDir == "" {
 		workDir = filepath.Join(".ntfuzz", "repos")
 	}
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir workDir %q: %w", workDir, err)
+		return CheckoutInfo{GoVersion: goVer}, fmt.Errorf("mkdir workDir %q: %w", workDir, err)
 	}
 
 	dest := filepath.Join(workDir, proj.Name)
-	absDest, err := filepath.Abs(dest)
-	if err == nil {
+	if absDest, err := filepath.Abs(dest); err == nil {
 		dest = absDest
 	}
 
 	gitDir := filepath.Join(dest, ".git")
 	if _, err := os.Stat(gitDir); err == nil {
-		// Existing clone: fetch & pull
 		if proj.Branch != "" {
-			_ = runGit(ctx, dest, "checkout", proj.Branch)
+			if err := runGit(ctx, dest, "checkout", proj.Branch); err != nil {
+				sha, dirty := inspectGitRevision(ctx, dest)
+				return CheckoutInfo{RepoDir: dest, GitSHA: sha, Dirty: dirty, GoVersion: goVer},
+					fmt.Errorf("git checkout %s: %w", proj.Branch, err)
+			}
 		}
 		if err := runGit(ctx, dest, "pull", "--ff-only"); err != nil {
-			// Non-fatal if offline or detached HEAD; log/return dest anyway
-			return dest, nil
+			sha, dirty := inspectGitRevision(ctx, dest)
+			return CheckoutInfo{RepoDir: dest, GitSHA: sha, Dirty: dirty, GoVersion: goVer},
+				fmt.Errorf("git pull --ff-only: %w", err)
 		}
-		return dest, nil
+		sha, dirty := inspectGitRevision(ctx, dest)
+		return CheckoutInfo{
+			RepoDir:   dest,
+			GitSHA:    sha,
+			Dirty:     dirty,
+			GoVersion: goVer,
+		}, nil
 	}
 
 	args := []string{"clone", "--depth", "1"}
@@ -69,9 +95,44 @@ func EnsureCheckout(ctx context.Context, proj ProjectConfig, workDir string) (st
 	}
 	args = append(args, repo, dest)
 	if err := runGit(ctx, "", args...); err != nil {
-		return "", fmt.Errorf("git clone %s: %w", repo, err)
+		return CheckoutInfo{GoVersion: goVer}, fmt.Errorf("git clone %s: %w", repo, err)
 	}
-	return dest, nil
+
+	sha, dirty := inspectGitRevision(ctx, dest)
+	return CheckoutInfo{
+		RepoDir:   dest,
+		GitSHA:    sha,
+		Dirty:     dirty,
+		GoVersion: goVer,
+	}, nil
+}
+
+func inspectGitRevision(ctx context.Context, dir string) (string, bool) {
+	shaCmd := exec.CommandContext(ctx, "git", "rev-parse", "--short=12", "HEAD")
+	shaCmd.Dir = dir
+	shaCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	shaOut, err := shaCmd.Output()
+	if err != nil {
+		return "", false
+	}
+	sha := strings.TrimSpace(string(shaOut))
+
+	statusCmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "--", ".")
+	statusCmd.Dir = dir
+	statusCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	statusOut, err := statusCmd.Output()
+	dirty := err == nil && len(strings.TrimSpace(string(statusOut))) > 0
+	return sha, dirty
+}
+
+func detectGoVersion(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "go", "env", "GOVERSION")
+	if out, err := cmd.Output(); err == nil {
+		if v := strings.TrimSpace(string(out)); v != "" {
+			return v
+		}
+	}
+	return runtime.Version()
 }
 
 func runGit(ctx context.Context, dir string, args ...string) error {
@@ -87,18 +148,60 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 	return nil
 }
 
-// DiscoverTargets scans repoDir for *_test.go files containing top-level FuzzXxx(f *testing.F) functions.
+// DiscoverTargets scans repoDir for *_test.go files matching current OS/arch build constraints
+// and containing top-level FuzzXxx(f *testing.F) functions. Supports multi-module repositories.
 func DiscoverTargets(ctx context.Context, repoDir string) ([]DiscoveredTarget, error) {
-	modPath := readModulePath(filepath.Join(repoDir, "go.mod"))
+	absRepo, err := filepath.Abs(repoDir)
+	if err == nil {
+		repoDir = absRepo
+	}
+
 	fset := token.NewFileSet()
+	bctx := build.Default
+
+	// Cache discovered go.mod paths by directory
+	modCache := map[string]struct {
+		modDir  string
+		modPath string
+	}{}
+
+	findModule := func(pkgDir string) (string, string) {
+		if cached, ok := modCache[pkgDir]; ok {
+			return cached.modDir, cached.modPath
+		}
+		cur := pkgDir
+		for {
+			goModFile := filepath.Join(cur, "go.mod")
+			if mp := readModulePath(goModFile); mp != "" {
+				modCache[pkgDir] = struct {
+					modDir  string
+					modPath string
+				}{cur, mp}
+				return cur, mp
+			}
+			if cur == repoDir {
+				break
+			}
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				break
+			}
+			cur = parent
+		}
+		modCache[pkgDir] = struct {
+			modDir  string
+			modPath string
+		}{repoDir, ""}
+		return repoDir, ""
+	}
 
 	type key struct {
-		relDir string
-		name   string
+		pkgImport string
+		name      string
 	}
 	seen := map[key]DiscoveredTarget{}
 
-	err := filepath.WalkDir(repoDir, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(repoDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -116,13 +219,19 @@ func DiscoverTargets(ctx context.Context, repoDir string) ([]DiscoveredTarget, e
 			return nil
 		}
 
+		pkgDir := filepath.Dir(path)
+		// Respect //go:build constraints and OS/arch file suffixes
+		if match, matchErr := bctx.MatchFile(pkgDir, d.Name()); matchErr != nil || !match {
+			return nil
+		}
+
 		fileAst, parseErr := parser.ParseFile(fset, path, nil, 0)
 		if parseErr != nil {
 			return nil
 		}
 
-		pkgDir := filepath.Dir(path)
-		relDir, relErr := filepath.Rel(repoDir, pkgDir)
+		modDir, modPath := findModule(pkgDir)
+		relDir, relErr := filepath.Rel(modDir, pkgDir)
 		if relErr != nil || relDir == "." {
 			relDir = "."
 		} else {
@@ -148,8 +257,9 @@ func DiscoverTargets(ctx context.Context, repoDir string) ([]DiscoveredTarget, e
 			if !isTestingFParam(fn.Type) {
 				continue
 			}
-			k := key{relDir: relDir, name: name}
+			k := key{pkgImport: pkgImport, name: name}
 			seen[k] = DiscoveredTarget{
+				ModuleDir:     modDir,
 				PackageImport: pkgImport,
 				PackageRelDir: relDir,
 				FuncName:      name,
