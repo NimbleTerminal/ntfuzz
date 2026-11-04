@@ -1,0 +1,27 @@
+# ntfuzz fleet configuration
+# Supports both local directory paths and remote Git repository URLs.
+corpus_dir: .ntfuzz/corpus
+work_dir: .ntfuzz/repos
+default_fuzztime: 10s
+
+projects:
+  - name: demo-parser
+    repo: ./examples/demo-parser
+    fuzztime: 6s
+    corpus_dir: .ntfuzz/corpus/demo-parser
+
+  - name: demo-codec
+    repo: ./examples/demo-codec
+    fuzztime: 6s
+    corpus_dir: .ntfuzz/corpus/demo-codec
+
+  # Example remote Git repositories with native Go fuzz targets:
+  # - name: go-yaml
+  #   repo: https://github.com/go-yaml/yaml.git
+  #   branch: v3
+  #   fuzztime: 15s
+  #
+  # - name: klauspost-compress
+  #   repo: https://github.com/klauspost/compress.git
+  #   branch: master
+  #   fuzztime: 30s
