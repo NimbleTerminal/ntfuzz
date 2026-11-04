@@ -1,0 +1,41 @@
+version: '3'
+
+vars:
+  BINARY: bin/ntfuzz
+  CONFIG: configs/projects.yaml
+  DB: ntfuzz.duckdb
+  LISTEN: 127.0.0.1:8080
+
+tasks:
+  default:
+    desc: Build the ntfuzz binary
+    cmds:
+      - task: build
+
+  build:
+    desc: Build the single-binary ntfuzz executable
+    cmds:
+      - mkdir -p bin
+      - go build -o {{.BINARY}} ./cmd/ntfuzz
+
+  test:
+    desc: Run all unit and integration tests
+    cmds:
+      - go test -v ./...
+
+  serve:
+    desc: Build and run ntfuzz serve (orchestrator + DuckDB + HTTP API + Booba web TUI)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} serve --config {{.CONFIG}} --db {{.DB}} --listen {{.LISTEN}}
+
+  tui:
+    desc: Build and run the terminal Bubble Tea dashboard against a running ntfuzz server
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} tui --api http://{{.LISTEN}}
+
+  clean:
+    desc: Remove build artifacts and temporary runtime directories
+    cmds:
+      - rm -rf bin/ .ntfuzz/ *.duckdb *.duckdb.wal
