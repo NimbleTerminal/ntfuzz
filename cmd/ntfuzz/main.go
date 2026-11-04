@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -24,12 +25,12 @@ func main() {
 	log.SetFlags(log.LstdFlags)
 
 	rootCmd := &cobra.Command{
-		Use:   "ntfuzz",
-		Short: "Continuous Go fuzzing orchestrator with DuckDB store and Booba/Bubble Tea TUI",
+		Use:          "ntfuzz",
+		Short:        "Continuous Go fuzzing orchestrator with DuckDB store and Booba/Bubble Tea TUI",
 		SilenceUsage: true,
 	}
 
-	rootCmd.AddCommand(newServeCmd(), newTUICmd())
+	rootCmd.AddCommand(newServeCmd(), newTUICmd(), newCrashCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -78,7 +79,6 @@ func newServeCmd() *cobra.Command {
 					}
 				}()
 			} else {
-				// Still perform an initial project/target sync so the store has project metadata
 				orch.SyncAll(ctx)
 			}
 
@@ -95,10 +95,10 @@ func newServeCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&configPath, "config", "c", "configs/projects.yaml", "Path to projects YAML config (uses embedded default if not found)")
+	cmd.Flags().StringVarP(&configPath, "config", "c", "configs/projects.yaml", "Path to projects YAML config (read once at startup; uses embedded default if not found)")
 	cmd.Flags().StringVarP(&dbPath, "db", "d", "ntfuzz.duckdb", "Path to DuckDB database file")
 	cmd.Flags().StringVarP(&listenAddr, "listen", "l", "127.0.0.1:8080", "HTTP listen address for API and Booba web TUI")
-	cmd.Flags().IntVarP(&workers, "workers", "w", 2, "Number of concurrent local fuzz workers")
+	cmd.Flags().IntVarP(&workers, "workers", "w", 2, "Number of concurrent local fuzz workers (each capped at GOMAXPROCS=1)")
 	cmd.Flags().DurationVar(&roundInterval, "interval", 5*time.Second, "Pause interval between fuzzing rounds")
 	cmd.Flags().BoolVar(&noOrchestrator, "no-orchestrator", false, "Serve API and Booba TUI without running background fuzz jobs")
 	cmd.Flags().BoolVar(&debug, "debug", false, "Enable verbose Booba server logging")
@@ -129,4 +129,64 @@ func newTUICmd() *cobra.Command {
 	cmd.Flags().DurationVar(&refresh, "refresh", 2*time.Second, "Dashboard polling interval")
 
 	return cmd
+}
+
+func newCrashCmd() *cobra.Command {
+	var apiURL string
+
+	crashCmd := &cobra.Command{
+		Use:   "crash",
+		Short: "List or triage recorded fuzzing crashes via the HTTP API",
+	}
+	crashCmd.PersistentFlags().StringVar(&apiURL, "api", "http://localhost:8080", "Base URL of the ntfuzz HTTP API")
+
+	var openOnly bool
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List crashes from the ntfuzz API",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client := api.NewClient(apiURL)
+			crashes, err := client.GetCrashes(cmd.Context(), openOnly, "")
+			if err != nil {
+				return err
+			}
+			if len(crashes) == 0 {
+				fmt.Println("No matching crashes.")
+				return nil
+			}
+			for _, c := range crashes {
+				state := "OPEN"
+				if c.FixedAt != nil {
+					state = "FIXED (" + c.FixedAt.Local().Format(time.RFC3339) + ")"
+				}
+				fmt.Printf("[#%d] %s  %s/%s@%s  hash=%s  fp=%s  input=%s\n",
+					c.ID, state, c.ProjectName, c.TargetName, c.GitSHA, c.InputHash, c.StackFingerprint, c.MinimizedInput)
+			}
+			return nil
+		},
+	}
+	listCmd.Flags().BoolVar(&openOnly, "open", true, "Show only open crashes")
+
+	var issueURL string
+	fixedCmd := &cobra.Command{
+		Use:   "fixed <crash-id>",
+		Short: "Mark a crash as fixed (and optionally attach an issue URL)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			crashID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil || crashID <= 0 {
+				return fmt.Errorf("invalid crash ID %q", args[0])
+			}
+			client := api.NewClient(apiURL)
+			if err := client.MarkCrashFixed(cmd.Context(), crashID, issueURL); err != nil {
+				return err
+			}
+			fmt.Printf("Marked crash #%d as fixed.\n", crashID)
+			return nil
+		},
+	}
+	fixedCmd.Flags().StringVar(&issueURL, "issue", "", "Optional issue URL to attach to the crash record")
+
+	crashCmd.AddCommand(listCmd, fixedCmd)
+	return crashCmd
 }

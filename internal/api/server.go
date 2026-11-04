@@ -3,44 +3,21 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/NimbleTerminal/ntfuzzy/internal/orchestrator"
 	"github.com/NimbleTerminal/ntfuzzy/internal/store"
 )
 
-// ActiveJob describes an in-flight fuzzing worker job managed by the orchestrator.
-type ActiveJob struct {
-	WorkerID    string    `json:"worker_id"`
-	Project     string    `json:"project"`
-	Package     string    `json:"package"`
-	Target      string    `json:"target"`
-	FuzzTime    string    `json:"fuzztime"`
-	StartedAt   time.Time `json:"started_at"`
-	Status      string    `json:"status"`
-}
-
 // WorkerStatusProvider reports current orchestrator worker activity.
 type WorkerStatusProvider interface {
-	ActiveJobs() []ActiveJob
+	ActiveJobs() []orchestrator.ActiveJob
 	WorkerCount() int
-}
-
-// StatusResponse is returned by GET /api/status.
-type StatusResponse struct {
-	FleetHealth   string      `json:"fleet_health"`
-	OpenCrashes   int         `json:"open_crashes"`
-	RunsLast24h   int         `json:"runs_last_24h"`
-	ExecsLast24h  int64       `json:"execs_last_24h"`
-	AvgExecsSec   float64     `json:"avg_execs_per_sec"`
-	TotalProjects int         `json:"total_projects"`
-	TotalTargets  int         `json:"total_targets"`
-	ActiveWorkers int         `json:"active_workers"`
-	MaxWorkers    int         `json:"max_workers"`
-	ActiveJobs    []ActiveJob `json:"active_jobs"`
-	UpdatedAt     time.Time   `json:"updated_at"`
 }
 
 // Server exposes the JSON HTTP API under /api/*.
@@ -66,6 +43,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/targets", s.handleTargets)
 	s.mux.HandleFunc("GET /api/runs", s.handleRuns)
 	s.mux.HandleFunc("GET /api/crashes", s.handleCrashes)
+	s.mux.HandleFunc("POST /api/crashes/{id}/fix", s.handleFixCrash)
 	s.mux.HandleFunc("GET /api/coverage/history", s.handleCoverageHistory)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
 }
@@ -73,7 +51,7 @@ func (s *Server) routes() {
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -83,22 +61,69 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
-	projects, err := s.store.ListProjects(r.Context())
+	rows, err := s.store.ListProjects(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projects)
+	out := make([]Project, 0, len(rows))
+	for _, p := range rows {
+		out = append(out, Project{
+			ID:             p.ID,
+			Name:           p.Name,
+			Repo:           p.Repo,
+			Branch:         p.Branch,
+			GitSHA:         p.GitSHA,
+			Dirty:          p.Dirty,
+			SyncError:      p.SyncError,
+			LastSynced:     p.LastSynced,
+			TargetCount:    p.TargetCount,
+			TotalRuns:      p.TotalRuns,
+			OpenCrashes:    p.OpenCrashes,
+			LatestStatus:   p.LatestStatus,
+			LastRunAt:      p.LastRunAt,
+			AvgExecsPerSec: p.AvgExecsPerSec,
+			AvgCoveragePct: p.AvgCoveragePct,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
-	targets, err := s.store.ListTargets(r.Context(), project)
+	rows, err := s.store.ListTargets(r.Context(), project)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, targets)
+	out := make([]Target, 0, len(rows))
+	for _, t := range rows {
+		out = append(out, Target{
+			ID:             t.ID,
+			ProjectID:      t.ProjectID,
+			ProjectName:    t.ProjectName,
+			Package:        t.Package,
+			Name:           t.Name,
+			LastRunID:      t.LastRunID,
+			LastStarted:    t.LastStarted,
+			DurationSec:    t.DurationSec,
+			Execs:          t.Execs,
+			ExecsPerSec:    t.ExecsPerSec,
+			NewInteresting: t.NewInteresting,
+			CorpusCount:    t.CorpusCount,
+			Crashes:        t.Crashes,
+			CoveragePct:    t.CoveragePct,
+			Status:         t.Status,
+			Worker:         t.Worker,
+			GitSHA:         t.GitSHA,
+			Dirty:          t.Dirty,
+			GoVersion:      t.GoVersion,
+			OpenCrashes:    t.OpenCrashes,
+			TotalRuns:      t.TotalRuns,
+			CoverageTrend:  t.CoverageTrend,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
@@ -109,12 +134,35 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	runs, err := s.store.ListRuns(r.Context(), target, limit)
+	rows, err := s.store.ListRuns(r.Context(), target, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, runs)
+	out := make([]Run, 0, len(rows))
+	for _, run := range rows {
+		out = append(out, Run{
+			ID:             run.ID,
+			TargetID:       run.TargetID,
+			ProjectName:    run.ProjectName,
+			Package:        run.Package,
+			TargetName:     run.TargetName,
+			Started:        run.Started,
+			DurationSec:    run.DurationSec,
+			Execs:          run.Execs,
+			ExecsPerSec:    run.ExecsPerSec,
+			NewInteresting: run.NewInteresting,
+			CorpusCount:    run.CorpusCount,
+			Crashes:        run.Crashes,
+			CoveragePct:    run.CoveragePct,
+			Status:         run.Status,
+			Worker:         run.Worker,
+			GitSHA:         run.GitSHA,
+			Dirty:          run.Dirty,
+			GoVersion:      run.GoVersion,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleCrashes(w http.ResponseWriter, r *http.Request) {
@@ -124,18 +172,59 @@ func (s *Server) handleCrashes(w http.ResponseWriter, r *http.Request) {
 		openOnly = false
 	}
 	target := strings.TrimSpace(r.URL.Query().Get("target"))
-	crashes, err := s.store.ListCrashes(r.Context(), openOnly, target)
+	rows, err := s.store.ListCrashes(r.Context(), openOnly, target)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, crashes)
+	out := make([]Crash, 0, len(rows))
+	for _, c := range rows {
+		out = append(out, Crash{
+			ID:               c.ID,
+			TargetID:         c.TargetID,
+			ProjectName:      c.ProjectName,
+			Package:          c.Package,
+			TargetName:       c.TargetName,
+			FirstSeen:        c.FirstSeen,
+			LastSeen:         c.LastSeen,
+			FixedAt:          c.FixedAt,
+			Stack:            c.Stack,
+			StackFingerprint: c.StackFingerprint,
+			InputHash:        c.InputHash,
+			MinimizedInput:   c.MinimizedInput,
+			IssueURL:         c.IssueURL,
+			GitSHA:           c.GitSHA,
+			Dirty:            c.Dirty,
+			GoVersion:        c.GoVersion,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleFixCrash(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSpace(r.PathValue("id"))
+	crashID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || crashID <= 0 {
+		writeError(w, http.StatusBadRequest, errors.New("invalid crash id"))
+		return
+	}
+
+	var req FixCrashRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
+	}
+
+	if err := s.store.MarkCrashFixed(r.Context(), crashID, time.Now().UTC(), strings.TrimSpace(req.IssueURL)); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "fixed", "id": crashID})
 }
 
 func (s *Server) handleCoverageHistory(w http.ResponseWriter, r *http.Request) {
 	target := strings.TrimSpace(r.URL.Query().Get("target"))
 	if target == "" {
-		writeJSON(w, http.StatusOK, []store.CoveragePoint{})
+		writeJSON(w, http.StatusOK, []CoveragePoint{})
 		return
 	}
 	limit := 50
@@ -144,12 +233,25 @@ func (s *Server) handleCoverageHistory(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	history, err := s.store.GetCoverageHistory(r.Context(), target, limit)
+	rows, err := s.store.GetCoverageHistory(r.Context(), target, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, history)
+	out := make([]CoveragePoint, 0, len(rows))
+	for _, pt := range rows {
+		out = append(out, CoveragePoint{
+			RunID:          pt.RunID,
+			TargetID:       pt.TargetID,
+			Started:        pt.Started,
+			CoveragePct:    pt.CoveragePct,
+			ExecsPerSec:    pt.ExecsPerSec,
+			NewInteresting: pt.NewInteresting,
+			CorpusCount:    pt.CorpusCount,
+			GitSHA:         pt.GitSHA,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +264,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	var activeJobs []ActiveJob
 	maxWorkers := 0
 	if s.workers != nil {
-		activeJobs = s.workers.ActiveJobs()
+		for _, j := range s.workers.ActiveJobs() {
+			activeJobs = append(activeJobs, ActiveJob{
+				WorkerID:  j.WorkerID,
+				Project:   j.Project,
+				Package:   j.Package,
+				Target:    j.Target,
+				FuzzTime:  j.FuzzTime,
+				GitSHA:    j.GitSHA,
+				Dirty:     j.Dirty,
+				StartedAt: j.StartedAt,
+				Status:    j.Status,
+			})
+		}
 		maxWorkers = s.workers.WorkerCount()
 	}
 	if activeJobs == nil {
@@ -189,6 +303,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		TotalTargets:  stats.TotalTargets,
 		ActiveWorkers: len(activeJobs),
 		MaxWorkers:    maxWorkers,
+		SchemaVersion: stats.SchemaVersion,
 		ActiveJobs:    activeJobs,
 		UpdatedAt:     time.Now().UTC(),
 	}
@@ -203,16 +318,8 @@ func writeJSON(w http.ResponseWriter, code int, payload any) {
 }
 
 func writeError(w http.ResponseWriter, code int, err error) {
-	if errors.IsContextCanceled(err) {
+	if errors.Is(err, context.Canceled) {
 		return
 	}
 	writeJSON(w, code, map[string]string{"error": err.Error()})
-}
-
-type errorsHelper struct{}
-
-var errors errorsHelper
-
-func (errorsHelper) IsContextCanceled(err error) bool {
-	return err != nil && err == context.Canceled
 }

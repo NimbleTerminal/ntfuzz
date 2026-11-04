@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,11 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/NimbleTerminal/ntfuzzy/internal/store"
 )
 
-// Client is an HTTP client for consuming the ntfuzz JSON API from the Bubble Tea TUI.
+// Client is an HTTP client for consuming the ntfuzz JSON API from the Bubble Tea TUI and CLI.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
@@ -47,25 +46,25 @@ func (c *Client) GetStatus(ctx context.Context) (StatusResponse, error) {
 }
 
 // GetProjects fetches all projects with latest status summaries from GET /api/projects.
-func (c *Client) GetProjects(ctx context.Context) ([]store.Project, error) {
-	var out []store.Project
+func (c *Client) GetProjects(ctx context.Context) ([]Project, error) {
+	var out []Project
 	err := c.getJSON(ctx, "/api/projects", nil, &out)
 	return out, err
 }
 
 // GetTargets fetches targets (optionally filtered by project) from GET /api/targets.
-func (c *Client) GetTargets(ctx context.Context, project string) ([]store.Target, error) {
+func (c *Client) GetTargets(ctx context.Context, project string) ([]Target, error) {
 	q := url.Values{}
 	if project != "" {
 		q.Set("project", project)
 	}
-	var out []store.Target
+	var out []Target
 	err := c.getJSON(ctx, "/api/targets", q, &out)
 	return out, err
 }
 
 // GetRuns fetches recent runs for a target from GET /api/runs.
-func (c *Client) GetRuns(ctx context.Context, target string, limit int) ([]store.Run, error) {
+func (c *Client) GetRuns(ctx context.Context, target string, limit int) ([]Run, error) {
 	q := url.Values{}
 	if target != "" {
 		q.Set("target", target)
@@ -73,28 +72,52 @@ func (c *Client) GetRuns(ctx context.Context, target string, limit int) ([]store
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
 	}
-	var out []store.Run
+	var out []Run
 	err := c.getJSON(ctx, "/api/runs", q, &out)
 	return out, err
 }
 
 // GetCrashes fetches crashes from GET /api/crashes.
-func (c *Client) GetCrashes(ctx context.Context, openOnly bool, target string) ([]store.Crash, error) {
+func (c *Client) GetCrashes(ctx context.Context, openOnly bool, target string) ([]Crash, error) {
 	q := url.Values{}
 	q.Set("open", strconv.FormatBool(openOnly))
 	if target != "" {
 		q.Set("target", target)
 	}
-	var out []store.Crash
+	var out []Crash
 	err := c.getJSON(ctx, "/api/crashes", q, &out)
 	return out, err
 }
 
+// MarkCrashFixed marks a crash as fixed via POST /api/crashes/{id}/fix.
+func (c *Client) MarkCrashFixed(ctx context.Context, crashID int64, issueURL string) error {
+	path := fmt.Sprintf("/api/crashes/%d/fix", crashID)
+	body, err := json.Marshal(FixCrashRequest{IssueURL: issueURL})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("POST %s returned HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
 // GetCoverageHistory fetches chronological coverage points from GET /api/coverage/history.
-func (c *Client) GetCoverageHistory(ctx context.Context, target string) ([]store.CoveragePoint, error) {
+func (c *Client) GetCoverageHistory(ctx context.Context, target string) ([]CoveragePoint, error) {
 	q := url.Values{}
 	q.Set("target", target)
-	var out []store.CoveragePoint
+	var out []CoveragePoint
 	err := c.getJSON(ctx, "/api/coverage/history", q, &out)
 	return out, err
 }

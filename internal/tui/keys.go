@@ -32,6 +32,7 @@ type KeyMap struct {
 	Back       key.Binding
 	Project    key.Binding
 	Crashes    key.Binding
+	FixCrash   key.Binding
 	Refresh    key.Binding
 	More       key.Binding
 	Visibility key.Binding
@@ -57,6 +58,7 @@ func NewKeyMap(mode ViewMode, hideHelp bool) KeyMap {
 		Back:       key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "Back to fleet")),
 		Project:    key.NewBinding(key.WithKeys("p", "tab"), key.WithHelp("p/tab", "Filter project")),
 		Crashes:    key.NewBinding(key.WithKeys("c"), key.WithHelp("c", crashesLabel)),
+		FixCrash:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "Mark crash fixed")),
 		Refresh:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "Refresh now")),
 		More:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "Full help")),
 		Visibility: key.NewBinding(key.WithKeys("h"), key.WithHelp("h", visLabel)),
@@ -71,7 +73,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 	case ViewDetail:
 		return []key.Binding{k.Back, k.Up, k.Down, k.Refresh, k.Crashes, k.More}
 	case ViewCrashes:
-		return []key.Binding{k.Back, k.Up, k.Down, k.Crashes, k.Refresh, k.More}
+		return []key.Binding{k.Back, k.Up, k.Down, k.FixCrash, k.Crashes, k.Refresh}
 	default:
 		return []key.Binding{k.Enter, k.Up, k.Down, k.Project, k.Crashes, k.Refresh}
 	}
@@ -87,7 +89,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		}
 	case ViewCrashes:
 		return [][]key.Binding{
-			{k.Back, k.Up, k.Down},
+			{k.Back, k.Up, k.Down, k.FixCrash},
 			{k.Crashes, k.Refresh, k.More, k.Visibility, k.Quit},
 		}
 	default:

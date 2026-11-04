@@ -17,29 +17,33 @@ import (
 	"github.com/NimbleMarkets/ntcharts/v2/sparkline"
 
 	"github.com/NimbleTerminal/ntfuzzy/internal/api"
-	"github.com/NimbleTerminal/ntfuzzy/internal/store"
 )
 
 type tickMsg time.Time
 
 type fleetDataMsg struct {
 	status   api.StatusResponse
-	projects []store.Project
-	targets  []store.Target
-	crashes  []store.Crash
+	projects []api.Project
+	targets  []api.Target
+	crashes  []api.Crash
 	err      error
 }
 
 type detailDataMsg struct {
 	targetID int64
-	runs     []store.Run
-	crashes  []store.Crash
-	history  []store.CoveragePoint
+	runs     []api.Run
+	crashes  []api.Crash
+	history  []api.CoveragePoint
 	err      error
 }
 
+type crashFixedMsg struct {
+	crashID int64
+	err     error
+}
+
 // Model is the shared Bubble Tea dashboard model for ntfuzz.
-// It communicates exclusively via the HTTP API client.
+// It communicates exclusively via the HTTP API client and never imports internal/store.
 type Model struct {
 	client          *api.Client
 	refreshInterval time.Duration
@@ -51,22 +55,22 @@ type Model struct {
 	help     help.Model
 
 	// Fleet state
-	status        api.StatusResponse
-	projects      []store.Project
-	targets       []store.Target
-	openCrashes   []store.Crash
-	projectIdx    int // 0 = All Projects, 1..N = projects[projectIdx-1]
-	selectedIdx   int
-	crashIdx      int
-	lastUpdated   time.Time
-	lastErr       error
-	loading       bool
+	status      api.StatusResponse
+	projects    []api.Project
+	targets     []api.Target
+	openCrashes []api.Crash
+	projectIdx  int // 0 = All Projects, 1..N = projects[projectIdx-1]
+	selectedIdx int
+	crashIdx    int
+	lastUpdated time.Time
+	lastErr     error
+	loading     bool
 
 	// Target Detail state
-	detailTarget  *store.Target
-	detailRuns    []store.Run
-	detailCrashes []store.Crash
-	detailHistory []store.CoveragePoint
+	detailTarget  *api.Target
+	detailRuns    []api.Run
+	detailCrashes []api.Crash
+	detailHistory []api.CoveragePoint
 	runsTable     table.Model
 	covSparkline  sparkline.Model
 }
@@ -78,15 +82,16 @@ func NewModel(client *api.Client, refreshInterval time.Duration) Model {
 	}
 
 	cols := []table.Column{
-		{Title: "Run ID", Width: 8},
-		{Title: "Started", Width: 19},
-		{Title: "Dur", Width: 7},
-		{Title: "Execs", Width: 10},
-		{Title: "Rate", Width: 10},
-		{Title: "+Corp", Width: 6},
-		{Title: "Cov %", Width: 8},
-		{Title: "Status", Width: 8},
-		{Title: "Worker", Width: 10},
+		{Title: "Run ID", Width: 7},
+		{Title: "Started", Width: 14},
+		{Title: "Rev", Width: 10},
+		{Title: "Dur", Width: 6},
+		{Title: "Execs", Width: 9},
+		{Title: "Rate", Width: 9},
+		{Title: "+New/Corp", Width: 10},
+		{Title: "Cov %", Width: 7},
+		{Title: "Status", Width: 7},
+		{Title: "Worker", Width: 8},
 	}
 	rt := table.New(
 		table.WithColumns(cols),
@@ -114,7 +119,7 @@ func NewModel(client *api.Client, refreshInterval time.Duration) Model {
 	return Model{
 		client:          client,
 		refreshInterval: refreshInterval,
-		width:           110,
+		width:           116,
 		height:          32,
 		mode:            ViewFleet,
 		help:            h,
@@ -160,7 +165,8 @@ func DescribeActions(inner tea.Model) bubblehelp.Description {
 	summary := fmt.Sprintf("Fleet: %d projects, %d targets, %d open crashes",
 		m.status.TotalProjects, m.status.TotalTargets, m.status.OpenCrashes)
 	if m.mode == ViewDetail && m.detailTarget != nil {
-		summary = fmt.Sprintf("Target %s/%s (%.1f%% cov)", m.detailTarget.ProjectName, m.detailTarget.Name, m.detailTarget.CoveragePct)
+		summary = fmt.Sprintf("Target %s/%s (%.1f%% cov, %d corpus)",
+			m.detailTarget.ProjectName, m.detailTarget.Name, m.detailTarget.CoveragePct, m.detailTarget.CorpusCount)
 	} else if m.mode == ViewCrashes {
 		summary = fmt.Sprintf("Open Crashes (%d)", len(m.openCrashes))
 	}
@@ -264,6 +270,19 @@ func (m Model) fetchDetailCmd(targetID int64) tea.Cmd {
 	}
 }
 
+func (m Model) fixCrashCmd(crashID int64) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		if client == nil {
+			return crashFixedMsg{crashID: crashID}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		err := client.MarkCrashFixed(ctx, crashID, "")
+		return crashFixedMsg{crashID: crashID, err: err}
+	}
+}
+
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -285,6 +304,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.fetchDetailCmd(m.detailTarget.ID))
 		}
 		return m, tea.Batch(cmds...)
+
+	case crashFixedMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err
+			return m, nil
+		}
+		m.lastErr = nil
+		return m, m.fetchFleetCmd()
 
 	case fleetDataMsg:
 		m.loading = false
@@ -359,6 +386,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.fetchDetailCmd(m.detailTarget.ID))
 			}
 			return m, tea.Batch(cmds...)
+
+		case key.Matches(msg, km.FixCrash):
+			if m.mode == ViewCrashes && len(m.openCrashes) > 0 && m.crashIdx < len(m.openCrashes) {
+				cID := m.openCrashes[m.crashIdx].ID
+				return m, m.fixCrashCmd(cID)
+			}
 
 		case key.Matches(msg, km.Crashes):
 			if m.mode == ViewCrashes {
@@ -446,10 +479,11 @@ func (m *Model) syncDetailWidgets() {
 		rows = append(rows, table.Row{
 			fmt.Sprintf("#%d", r.ID),
 			r.Started.Local().Format("01-02 15:04:05"),
+			formatRevision(r.GitSHA, r.Dirty),
 			fmt.Sprintf("%.1fs", r.DurationSec),
 			fmt.Sprintf("%d", r.Execs),
 			FormatExecRate(r.ExecsPerSec),
-			fmt.Sprintf("+%d", r.NewInteresting),
+			fmt.Sprintf("+%d/%d", r.NewInteresting, r.CorpusCount),
 			fmt.Sprintf("%.1f%%", r.CoveragePct),
 			strings.ToUpper(r.Status),
 			r.Worker,
@@ -474,8 +508,15 @@ func (m Model) View() tea.View {
 	b.WriteString("\n")
 
 	if m.lastErr != nil {
-		b.WriteString(errorBannerStyle.Render(fmt.Sprintf("  ⚠ API connection warning: %v", m.lastErr)))
+		b.WriteString(errorBannerStyle.Render(fmt.Sprintf("  ⚠ API warning: %v", m.lastErr)))
 		b.WriteString("\n")
+	}
+
+	for _, p := range m.projects {
+		if p.SyncError != "" {
+			b.WriteString(errorBannerStyle.Render(fmt.Sprintf("  ⚠ Project %s sync error: %s", p.Name, p.SyncError)))
+			b.WriteString("\n")
+		}
 	}
 
 	switch m.mode {
@@ -549,9 +590,13 @@ func (m Model) renderFleetView() string {
 		filterTabs = append(filterTabs, subtleTextStyle.Render("["+allLabel+"]"))
 	}
 	for i, p := range m.projects {
-		lbl := fmt.Sprintf("%s (%d)", p.Name, p.TargetCount)
+		rev := formatRevision(p.GitSHA, p.Dirty)
+		lbl := fmt.Sprintf("%s@%s (%d)", p.Name, rev, p.TargetCount)
 		if p.OpenCrashes > 0 {
 			lbl += fmt.Sprintf(" ✖%d", p.OpenCrashes)
+		}
+		if p.SyncError != "" {
+			lbl += " !sync"
 		}
 		if m.projectIdx == i+1 {
 			filterTabs = append(filterTabs, titleStyle.Render(lbl))
@@ -562,8 +607,8 @@ func (m Model) renderFleetView() string {
 	b.WriteString("Filter: " + strings.Join(filterTabs, "  ") + "\n\n")
 
 	// Targets Table Header
-	hdr := fmt.Sprintf("  %-8s  %-16s  %-22s  %-12s  %-10s  %-7s  %-10s  %-7s",
-		"STATUS", "PROJECT", "TARGET", "LAST RUN", "EXECS/SEC", "COV %", "TREND", "CRASHES")
+	hdr := fmt.Sprintf("  %-8s  %-15s  %-20s  %-10s  %-10s  %-9s  %-6s  %-7s  %-9s  %-6s",
+		"STATUS", "PROJECT", "TARGET", "REVISION", "LAST RUN", "EXECS/SEC", "CORP", "COV %", "TREND", "CRASH")
 	b.WriteString(headerRowStyle.Render(hdr) + "\n")
 
 	if len(m.targets) == 0 {
@@ -605,14 +650,17 @@ func (m Model) renderFleetView() string {
 			}
 
 			trend := RenderCoverageTrend(t.CoverageTrend, 8)
+			rev := formatRevision(t.GitSHA, t.Dirty)
 
-			rowStr := fmt.Sprintf("%s%-8s  %-16s  %-22s  %-12s  %-10s  %6.1f%%  %-10s  %s",
+			rowStr := fmt.Sprintf("%s%-8s  %-15s  %-20s  %-10s  %-10s  %-9s  %6d  %6.1f%%  %-9s  %s",
 				cursor,
 				badge,
-				truncate(t.ProjectName, 16),
-				truncate(t.Name, 22),
+				truncate(t.ProjectName, 15),
+				truncate(t.Name, 20),
+				truncate(rev, 10),
 				lastRun,
 				FormatExecRate(t.ExecsPerSec),
+				t.CorpusCount,
 				t.CoveragePct,
 				trend,
 				crashCell,
@@ -629,7 +677,8 @@ func (m Model) renderFleetView() string {
 	if len(m.status.ActiveJobs) > 0 {
 		var jobs []string
 		for _, j := range m.status.ActiveJobs {
-			jobs = append(jobs, fmt.Sprintf("[%s] %s/%s (%s)", j.WorkerID, j.Project, j.Target, j.FuzzTime))
+			jobs = append(jobs, fmt.Sprintf("[%s] %s/%s@%s (%s)",
+				j.WorkerID, j.Project, j.Target, formatRevision(j.GitSHA, j.Dirty), j.FuzzTime))
 		}
 		b.WriteString("\n" + statusRunningStyle.Render("Active Jobs: ") + strings.Join(jobs, "  •  ") + "\n")
 	}
@@ -644,14 +693,17 @@ func (m Model) renderDetailView() string {
 	t := m.detailTarget
 
 	var top strings.Builder
-	top.WriteString(fmt.Sprintf("Target: %s  •  Project: %s  •  Package: %s\n",
+	top.WriteString(fmt.Sprintf("Target: %s  •  Project: %s  •  Package: %s  •  Rev: %s  •  Go: %s\n",
 		cardValueStyle.Render(t.Name),
 		cardValueStyle.Render(t.ProjectName),
 		subtleTextStyle.Render(t.Package),
+		cardValueStyle.Render(formatRevision(t.GitSHA, t.Dirty)),
+		subtleTextStyle.Render(nonEmpty(t.GoVersion, "n/a")),
 	))
-	top.WriteString(fmt.Sprintf("Status: %s  •  Latest Rate: %s  •  Coverage: %.1f%%  •  Trend: %s  •  Total Runs: %d  •  Open Crashes: %d\n",
+	top.WriteString(fmt.Sprintf("Status: %s  •  Rate: %s  •  Corpus: %d  •  Coverage: %.1f%%  •  Trend: %s  •  Runs: %d  •  Open Crashes: %d\n",
 		RenderStatusBadge(t.Status, false),
 		cardValueStyle.Render(FormatExecRate(t.ExecsPerSec)),
+		t.CorpusCount,
 		t.CoveragePct,
 		RenderCoverageTrend(t.CoverageTrend, 10),
 		t.TotalRuns,
@@ -660,7 +712,7 @@ func (m Model) renderDetailView() string {
 
 	// Sparkline + Recent Runs
 	sparkBox := panelStyle.Render(
-		cardTitleStyle.Render("Coverage Sparkline (ntcharts)") + "\n" + m.covSparkline.View(),
+		cardTitleStyle.Render("Corpus Coverage Sparkline (ntcharts)") + "\n" + m.covSparkline.View(),
 	)
 
 	runsBox := activePanelStyle.Render(
@@ -677,8 +729,10 @@ func (m Model) renderDetailView() string {
 				crashB.WriteString(subtleTextStyle.Render(fmt.Sprintf("\n...and %d more open crashes", len(m.detailCrashes)-3)))
 				break
 			}
-			crashB.WriteString(fmt.Sprintf("• %s  artifact: %s  (last seen %s)\n  %s\n",
+			crashB.WriteString(fmt.Sprintf("• %s  fp:%s  rev:%s  artifact: %s  (last seen %s)\n  %s\n",
 				statusCrashStyle.Render("hash:"+truncate(c.InputHash, 16)),
+				subtleTextStyle.Render(truncate(c.StackFingerprint, 12)),
+				subtleTextStyle.Render(formatRevision(c.GitSHA, c.Dirty)),
 				subtleTextStyle.Render(c.MinimizedInput),
 				formatRelativeTime(c.LastSeen),
 				truncate(firstLine(c.Stack), 90),
@@ -696,7 +750,7 @@ func (m Model) renderDetailView() string {
 
 func (m Model) renderCrashesView() string {
 	var b strings.Builder
-	b.WriteString(headerRowStyle.Render(fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d)", len(m.openCrashes))) + "\n\n")
+	b.WriteString(headerRowStyle.Render(fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d) — press 'x' to mark selected crash fixed", len(m.openCrashes))) + "\n\n")
 
 	if len(m.openCrashes) == 0 {
 		b.WriteString(statusOKStyle.Render("  ✓ Zero open crashes across the fleet.\n"))
@@ -708,9 +762,13 @@ func (m Model) renderCrashesView() string {
 		if i == m.crashIdx {
 			cursor = "▸ "
 		}
-		line := fmt.Sprintf("%s[id:%d] %s/%s  hash:%s  seen:%s  input:%s",
-			cursor, c.ID, c.ProjectName, c.TargetName, truncate(c.InputHash, 14),
-			formatRelativeTime(c.LastSeen), c.MinimizedInput)
+		line := fmt.Sprintf("%s[id:%d] %s/%s@%s  hash:%s  fp:%s  seen:%s  input:%s",
+			cursor, c.ID, c.ProjectName, c.TargetName,
+			formatRevision(c.GitSHA, c.Dirty),
+			truncate(c.InputHash, 14),
+			truncate(c.StackFingerprint, 10),
+			formatRelativeTime(c.LastSeen),
+			c.MinimizedInput)
 		if i == m.crashIdx {
 			b.WriteString(selectedRowStyle.Render(line) + "\n")
 			b.WriteString(subtleTextStyle.Render("    Stack: "+firstLine(c.Stack)) + "\n")
@@ -719,6 +777,26 @@ func (m Model) renderCrashesView() string {
 		}
 	}
 	return panelStyle.Width(max(80, m.width-2)).Render(b.String())
+}
+
+func formatRevision(sha string, dirty bool) string {
+	if sha == "" {
+		return "local"
+	}
+	if len(sha) > 8 {
+		sha = sha[:8]
+	}
+	if dirty {
+		return sha + "*"
+	}
+	return sha
+}
+
+func nonEmpty(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
 }
 
 func formatRelativeTime(t time.Time) string {

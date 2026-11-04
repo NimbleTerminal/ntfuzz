@@ -9,7 +9,6 @@ import (
 	"github.com/NimbleMarkets/go-booba/actions/bubblehelp"
 
 	"github.com/NimbleTerminal/ntfuzzy/internal/api"
-	"github.com/NimbleTerminal/ntfuzzy/internal/store"
 )
 
 func TestModelPureTransitionsAndViews(t *testing.T) {
@@ -26,11 +25,11 @@ func TestModelPureTransitionsAndViews(t *testing.T) {
 			ActiveWorkers: 1,
 			MaxWorkers:    2,
 		},
-		projects: []store.Project{
-			{ID: 1, Name: "demo-parser", TargetCount: 1, OpenCrashes: 1},
-			{ID: 2, Name: "demo-codec", TargetCount: 1, OpenCrashes: 0},
+		projects: []api.Project{
+			{ID: 1, Name: "demo-parser", GitSHA: "abc12345", Dirty: false, TargetCount: 1, OpenCrashes: 1},
+			{ID: 2, Name: "demo-codec", GitSHA: "def67890", Dirty: true, TargetCount: 1, OpenCrashes: 0, SyncError: "git pull failed"},
 		},
-		targets: []store.Target{
+		targets: []api.Target{
 			{
 				ID:            10,
 				ProjectID:     1,
@@ -39,8 +38,11 @@ func TestModelPureTransitionsAndViews(t *testing.T) {
 				Name:          "FuzzParseExpr",
 				LastStarted:   &now,
 				ExecsPerSec:   24500,
+				CorpusCount:   18,
 				CoveragePct:   78.4,
 				Status:        "crash",
+				GitSHA:        "abc12345",
+				GoVersion:     "go1.27.3",
 				OpenCrashes:   1,
 				TotalRuns:     7,
 				CoverageTrend: []float64{60.0, 68.5, 74.1, 78.4},
@@ -53,32 +55,39 @@ func TestModelPureTransitionsAndViews(t *testing.T) {
 				Name:          "FuzzDecodeFrame",
 				LastStarted:   &now,
 				ExecsPerSec:   41200,
+				CorpusCount:   22,
 				CoveragePct:   88.0,
 				Status:        "ok",
+				GitSHA:        "def67890",
+				Dirty:         true,
+				GoVersion:     "go1.27.3",
 				OpenCrashes:   0,
 				TotalRuns:     7,
 				CoverageTrend: []float64{80.0, 84.0, 88.0},
 			},
 		},
-		crashes: []store.Crash{
+		crashes: []api.Crash{
 			{
-				ID:             1,
-				TargetID:       10,
-				ProjectName:    "demo-parser",
-				TargetName:     "FuzzParseExpr",
-				FirstSeen:      now,
-				LastSeen:       now,
-				Stack:          "panic: unexpected token",
-				InputHash:      "1122334455667788",
-				MinimizedInput: "testdata/fuzz/FuzzParseExpr/1122334455667788",
+				ID:               1,
+				TargetID:         10,
+				ProjectName:      "demo-parser",
+				TargetName:       "FuzzParseExpr",
+				FirstSeen:        now,
+				LastSeen:         now,
+				Stack:            "panic: unexpected token",
+				StackFingerprint: "fp1234567890",
+				InputHash:        "1122334455667788",
+				MinimizedInput:   ".ntfuzz/corpus/demo-parser/crashes/FuzzParseExpr/1122334455667788",
+				GitSHA:           "abc12345",
+				GoVersion:        "go1.27.3",
 			},
 		},
 	})
 
 	m = next.(Model)
 	fleetView := m.View().Content
-	if !strings.Contains(fleetView, "FuzzParseExpr") || !strings.Contains(fleetView, "demo-parser") {
-		t.Fatalf("expected fleet view to contain target and project, got:\n%s", fleetView)
+	if !strings.Contains(fleetView, "FuzzParseExpr") || !strings.Contains(fleetView, "abc12345") || !strings.Contains(fleetView, "git pull failed") {
+		t.Fatalf("expected fleet view to contain target, revision, and sync error, got:\n%s", fleetView)
 	}
 
 	// Press 'enter' to open target detail view
@@ -91,7 +100,7 @@ func TestModelPureTransitionsAndViews(t *testing.T) {
 	// Feed detail data
 	next, _ = m.Update(detailDataMsg{
 		targetID: 10,
-		runs: []store.Run{
+		runs: []api.Run{
 			{
 				ID:             101,
 				TargetID:       10,
@@ -100,16 +109,19 @@ func TestModelPureTransitionsAndViews(t *testing.T) {
 				Execs:          122500,
 				ExecsPerSec:    24500,
 				NewInteresting: 3,
+				CorpusCount:    18,
 				Crashes:        1,
 				CoveragePct:    78.4,
 				Status:         "crash",
 				Worker:         "local-1",
+				GitSHA:         "abc12345",
+				GoVersion:      "go1.27.3",
 			},
 		},
 		crashes: m.openCrashes,
-		history: []store.CoveragePoint{
-			{RunID: 100, TargetID: 10, Started: now.Add(-time.Minute), CoveragePct: 68.5},
-			{RunID: 101, TargetID: 10, Started: now, CoveragePct: 78.4},
+		history: []api.CoveragePoint{
+			{RunID: 100, TargetID: 10, Started: now.Add(-time.Minute), CoveragePct: 68.5, CorpusCount: 15},
+			{RunID: 101, TargetID: 10, Started: now, CoveragePct: 78.4, CorpusCount: 18},
 		},
 	})
 	m = next.(Model)
