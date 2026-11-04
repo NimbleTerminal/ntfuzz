@@ -1,0 +1,8 @@
+/bin/
+/ntfuzz
+/.ntfuzz/
+*.duckdb
+*.duckdb.wal
+*.test
+*.out
+.DS_Store
