@@ -130,3 +130,47 @@ projects:
 
 Released under the [MIT License](./LICENSE).
 
+
+
+## Public read-only snapshots
+
+Keep the orchestrator private and publish immutable generations:
+
+```sh
+ntfuzz serve --config fleet.yaml --db live.duckdb --listen 127.0.0.1:8080 \
+  --snapshot-dir /var/lib/ntfuzz/public --snapshot-interval 1m
+ntfuzz view --snapshots /var/lib/ntfuzz/public --listen 127.0.0.1:8081 --refresh 10s
+```
+
+`serve` uses DuckDB `COPY FROM DATABASE` through the writer's own connection,
+with store mutations serialized during the copy. It detaches/closes the copied
+file before publishing `current.json` by atomic rename. The database file is
+immutable after publication, includes a schema version and publication timestamp,
+and is separate from the live database/WAL. The publisher retains two completed
+generations; active readers retain their file until refresh. Snapshot publication
+errors are logged and do not stop fuzz workers.
+
+`view` opens existing files through `nimbleterminal.dev/ntduckbox`: read-only
+access, no migrations, locked configuration, no extension loading/external file
+or network reads, and bounded query time/output. The viewer runs no orchestrator,
+clones no repositories, and registers no mutation endpoint. Its terminal disables
+crash-fixing actions and labels the snapshot timestamp. Failed refreshes retain
+the last validated generation; failure to open the initial generation prevents
+startup. The API reports `read_only`, `snapshot_at`, and `fleet_health=snapshot`;
+it does not invent live worker activity from stale data.
+
+Run the viewer under a different OS identity with only read access to the publish
+directory. It must have no access to the writer database, corpus, repository
+credentials, or private operator API. `view --listen-fd 3` accepts an inherited
+listener (for example a systemd socket). Browser terminal API requests are handled
+in process, so the viewer can run with `PrivateNetwork=true` while serving that
+inherited listener. This is useful for OS-level confinement; ntduckbox's SQL
+restrictions are not a substitute for a process boundary. ntconfine integration
+is not implemented here; do not assume its closed networking policy can launch
+an ordinary HTTP listener without inherited descriptors.
+
+The default viewer limits browser sessions to 32 and idle sessions to ten minutes.
+Queries are capped at 10,000 rows, 16 MiB output, and five seconds. The HTTP API
+exposes fixed dashboard queries, not arbitrary user SQL. Set process memory/CPU
+limits in deployment as well. Public snapshots expose the configured fleet's
+project/run/crash details; publish only data intended for public viewing.

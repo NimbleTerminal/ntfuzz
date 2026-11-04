@@ -46,6 +46,7 @@ type crashFixedMsg struct {
 // It communicates exclusively via the HTTP API client and never imports internal/store.
 type Model struct {
 	client          *api.Client
+	readOnly        bool
 	refreshInterval time.Duration
 
 	width    int
@@ -77,6 +78,9 @@ type Model struct {
 
 // NewModel constructs a pure Bubble Tea Model backed by the HTTP API client.
 func NewModel(client *api.Client, refreshInterval time.Duration) Model {
+	return NewModelOptions(client, refreshInterval, false)
+}
+func NewModelOptions(client *api.Client, refreshInterval time.Duration, readOnly bool) Model {
 	if refreshInterval <= 0 {
 		refreshInterval = 2 * time.Second
 	}
@@ -118,6 +122,7 @@ func NewModel(client *api.Client, refreshInterval time.Duration) Model {
 
 	return Model{
 		client:          client,
+		readOnly:        readOnly,
 		refreshInterval: refreshInterval,
 		width:           116,
 		height:          32,
@@ -132,7 +137,10 @@ func NewModel(client *api.Client, refreshInterval time.Duration) Model {
 // NewActionModel wraps Model with go-booba's bubblehelp adapter so keybindings
 // are published as OSC 7501 Booba Terminal Actions.
 func NewActionModel(client *api.Client, refreshInterval time.Duration) (tea.Model, error) {
-	base := NewModel(client, refreshInterval)
+	return NewActionModelOptions(client, refreshInterval, false)
+}
+func NewActionModelOptions(client *api.Client, refreshInterval time.Duration, readOnly bool) (tea.Model, error) {
+	base := NewModelOptions(client, refreshInterval, readOnly)
 	return bubblehelp.NewModelWithFallback(base, DescribeActions, bubblehelp.ModelOptions{
 		Adapter: bubblehelp.Options{
 			Customize: func(b key.Binding, a *actions.Action) error {
@@ -157,7 +165,7 @@ func DescribeActions(inner tea.Model) bubblehelp.Description {
 		}
 	}
 
-	km := NewKeyMap(m.mode, m.hideHelp)
+	km := m.keyMap()
 	state := "idle"
 	if m.status.ActiveWorkers > 0 {
 		state = "working"
@@ -271,6 +279,9 @@ func (m Model) fetchDetailCmd(targetID int64) tea.Cmd {
 }
 
 func (m Model) fixCrashCmd(crashID int64) tea.Cmd {
+	if m.readOnly {
+		return nil
+	}
 	client := m.client
 	return func() tea.Msg {
 		if client == nil {
@@ -314,6 +325,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.fetchFleetCmd()
 
 	case fleetDataMsg:
+		if msg.status.ReadOnly {
+			m.readOnly = true
+		}
 		m.loading = false
 		if msg.err != nil {
 			m.lastErr = msg.err
@@ -366,7 +380,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
-		km := NewKeyMap(m.mode, m.hideHelp)
+		km := m.keyMap()
 		switch {
 		case key.Matches(msg, km.Quit):
 			return m, tea.Quit
@@ -530,7 +544,7 @@ func (m Model) View() tea.View {
 
 	if !m.hideHelp {
 		b.WriteString("\n")
-		b.WriteString(m.help.View(NewKeyMap(m.mode, m.hideHelp)))
+		b.WriteString(m.help.View(m.keyMap()))
 	}
 
 	v := tea.NewView(b.String())
@@ -544,6 +558,13 @@ func (m Model) renderHeader() string {
 		apiURL = m.client.BaseURL()
 	}
 	title := titleStyle.Render(" NTFUZZ ")
+	if m.readOnly {
+		label := "Public snapshot • read-only"
+		if m.status.SnapshotAt != nil {
+			label += " • " + m.status.SnapshotAt.UTC().Format("2006-01-02 15:04:05 UTC")
+		}
+		return lipgloss.NewStyle().Width(max(1, m.width)).Render(lipgloss.JoinHorizontal(lipgloss.Center, title, subtitleStyle.Render(label)))
+	}
 	sub := subtitleStyle.Render(fmt.Sprintf("Continuous Go Fuzzing Orchestrator • API %s", apiURL))
 	if !m.lastUpdated.IsZero() {
 		sub += subtleTextStyle.Render(fmt.Sprintf(" • synced %s", m.lastUpdated.Format("15:04:05")))
@@ -765,7 +786,11 @@ func (m Model) renderDetailView() string {
 
 func (m Model) renderCrashesView() string {
 	var b strings.Builder
-	b.WriteString(headerRowStyle.Render(fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d) — press 'x' to mark selected crash fixed", len(m.openCrashes))) + "\n\n")
+	title := fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d)", len(m.openCrashes))
+	if !m.readOnly {
+		title += " — press 'x' to mark selected crash fixed"
+	}
+	b.WriteString(headerRowStyle.Render(title) + "\n\n")
 
 	if len(m.openCrashes) == 0 {
 		b.WriteString(statusOKStyle.Render("  ✓ Zero open crashes across the fleet.\n"))
@@ -854,4 +879,12 @@ func firstLine(s string) string {
 		return strings.TrimSpace(s[:idx])
 	}
 	return s
+}
+
+func (m Model) keyMap() KeyMap {
+	km := NewKeyMap(m.mode, m.hideHelp)
+	if m.readOnly {
+		km.FixCrash.SetEnabled(false)
+	}
+	return km
 }

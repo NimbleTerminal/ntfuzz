@@ -28,7 +28,7 @@ func main() {
 		SilenceUsage: true,
 	}
 
-	rootCmd.AddCommand(newServeCmd(), newTUICmd(), newCrashCmd())
+	rootCmd.AddCommand(newServeCmd(), newViewCmd(), newTUICmd(), newCrashCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -37,13 +37,15 @@ func main() {
 
 func newServeCmd() *cobra.Command {
 	var (
-		configPath     string
-		dbPath         string
-		listenAddr     string
-		workers        int
-		roundInterval  time.Duration
-		noOrchestrator bool
-		debug          bool
+		configPath       string
+		snapshotDir      string
+		snapshotInterval time.Duration
+		dbPath           string
+		listenAddr       string
+		workers          int
+		roundInterval    time.Duration
+		noOrchestrator   bool
+		debug            bool
 	)
 
 	cmd := &cobra.Command{
@@ -53,6 +55,9 @@ func newServeCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
+			if snapshotDir != "" && snapshotInterval <= 0 {
+				return fmt.Errorf("snapshot interval must be positive")
+			}
 			logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 			cfg, err := orchestrator.LoadConfig(configPath)
@@ -65,6 +70,30 @@ func newServeCmd() *cobra.Command {
 				return fmt.Errorf("open duckdb store %q: %w", dbPath, err)
 			}
 			defer func() { _ = st.Close() }()
+			if snapshotDir != "" {
+				snapshotCtx, cancelSnapshots := context.WithCancel(ctx)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					timer := time.NewTicker(snapshotInterval)
+					defer timer.Stop()
+					publish := func() {
+						if _, err := st.PublishSnapshot(snapshotCtx, snapshotDir); err != nil {
+							logger.Error("publish snapshot failed", "err", err)
+						}
+					}
+					publish()
+					for {
+						select {
+						case <-snapshotCtx.Done():
+							return
+						case <-timer.C:
+							publish()
+						}
+					}
+				}()
+				defer func() { cancelSnapshots(); <-done }()
+			}
 
 			orch := orchestrator.New(cfg, st, orchestrator.Options{
 				Workers:       workers,
@@ -73,7 +102,7 @@ func newServeCmd() *cobra.Command {
 			})
 
 			var orchWG sync.WaitGroup
-			defer orchWG.Wait()
+			defer func() { stop(); orchWG.Wait() }()
 
 			if !noOrchestrator {
 				orchWG.Add(1)
@@ -110,6 +139,8 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&listenAddr, "listen", "l", "127.0.0.1:8080", "HTTP listen address for API and Booba web TUI")
 	cmd.Flags().IntVarP(&workers, "workers", "w", 2, "Number of concurrent local fuzz workers (each capped at GOMAXPROCS=1)")
 	cmd.Flags().DurationVar(&roundInterval, "interval", 5*time.Second, "Pause interval between fuzzing rounds")
+	cmd.Flags().StringVar(&snapshotDir, "snapshot-dir", "", "Publish immutable DuckDB generations in this directory")
+	cmd.Flags().DurationVar(&snapshotInterval, "snapshot-interval", time.Minute, "Interval between database snapshots")
 	cmd.Flags().BoolVar(&noOrchestrator, "no-orchestrator", false, "Serve API and Booba TUI without running background fuzz jobs")
 	cmd.Flags().BoolVar(&debug, "debug", false, "Enable verbose Booba server logging")
 

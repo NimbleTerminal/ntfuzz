@@ -1,5 +1,17 @@
 # `ntfuzz` CHANGELOG
 
+## Unreleased — 2026-11-04
+
+- Add periodic immutable DuckDB snapshot publication through the live writer,
+  atomic manifests, and bounded generation retention.
+- Add `ntfuzz view`: a separate read-only Booba web terminal and fixed JSON API
+  backed by ntduckbox, with safe generation refresh and publication timestamps.
+- Remove mutation routes and crash-fixing terminal actions in snapshot mode.
+- Support inherited listener descriptors and in-process terminal API transport
+  so a deployment can isolate the viewer from the private writer's network.
+- Test snapshot/read API parity, writer isolation, injection-resistant filter
+  binding, read-only actions, and recovery after invalid snapshot publication.
+
 ## [0.1.0] - 2026-11-04
 
 ### Added

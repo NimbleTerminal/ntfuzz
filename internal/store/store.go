@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"nimbleterminal.dev/ntduckbox"
 	"strings"
 	"sync"
 	"time"
@@ -21,8 +22,9 @@ var ErrNotFound = errors.New("record not found")
 
 // Store manages persistence of fuzzing projects, targets, runs, and crashes in DuckDB.
 type Store struct {
-	db *sql.DB
-	mu sync.Mutex
+	db       *sql.DB
+	readonly *ntduckbox.DB
+	mu       sync.Mutex
 }
 
 // ProjectSyncInput carries repository checkout metadata when syncing a project.
@@ -175,6 +177,9 @@ func Open(path string) (*Store, error) {
 
 // Close closes the underlying DuckDB connection.
 func (s *Store) Close() error {
+	if s != nil && s.readonly != nil {
+		return s.readonly.Close()
+	}
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -190,7 +195,7 @@ func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 
 func (s *Store) schemaVersionLocked(ctx context.Context) (int, error) {
 	var v int
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&v)
+	err := s.queryRow(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&v)
 	if err != nil {
 		return 0, err
 	}
@@ -199,6 +204,9 @@ func (s *Store) schemaVersionLocked(ctx context.Context) (int, error) {
 
 // Migrate creates or upgrades all required tables, sequences, indexes, and views using versioned migrations.
 func (s *Store) Migrate(ctx context.Context) error {
+	if s.readonly != nil {
+		return ErrReadOnly
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -414,6 +422,9 @@ func (s *Store) UpsertProject(ctx context.Context, name, repo, branch string, sy
 // SyncProject records project checkout state, revision (git_sha + dirty), and any sync error.
 // If in.SyncedAt is nil (e.g. a failed git pull), last_synced is NOT advanced, and sync_error is recorded.
 func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, error) {
+	if s.readonly != nil {
+		return 0, ErrReadOnly
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -465,6 +476,9 @@ func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, er
 
 // UpsertTarget ensures a target (project_id, package, name) exists and is marked active, returning its ID.
 func (s *Store) UpsertTarget(ctx context.Context, projectID int64, pkg, name string) (int64, error) {
+	if s.readonly != nil {
+		return 0, ErrReadOnly
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.upsertTargetLocked(ctx, projectID, pkg, name)
@@ -501,6 +515,9 @@ func (s *Store) upsertTargetLocked(ctx context.Context, projectID int64, pkg, na
 // ReconcileProjectTargets upserts all discovered targets for a project as active=TRUE and
 // marks any previously stored targets for that project that were not discovered as active=FALSE.
 func (s *Store) ReconcileProjectTargets(ctx context.Context, projectID int64, discovered []TargetKey) (map[TargetKey]int64, error) {
+	if s.readonly != nil {
+		return nil, ErrReadOnly
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -543,6 +560,9 @@ func (s *Store) ReconcileProjectTargets(ctx context.Context, projectID int64, di
 
 // InsertRun records a completed fuzz run (including revision and Go version) and returns its new run ID.
 func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
+	if s.readonly != nil {
+		return 0, ErrReadOnly
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -579,6 +599,9 @@ func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 // RecordCrash inserts a new crash or updates last_seen if the same (target_id, input_hash)
 // or (target_id, stack_fingerprint) already exists.
 func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
+	if s.readonly != nil {
+		return 0, ErrReadOnly
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -650,6 +673,9 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 
 // MarkCrashFixed marks a crash as fixed at fixedAt and optionally sets issueURL.
 func (s *Store) MarkCrashFixed(ctx context.Context, crashID int64, fixedAt time.Time, issueURL string) error {
+	if s.readonly != nil {
+		return ErrReadOnly
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -679,6 +705,9 @@ func (s *Store) MarkCrashFixed(ctx context.Context, crashID int64, fixedAt time.
 // PruneOldRuns deletes raw runs older than retention while preserving at least the most recent
 // keepPerTarget runs per target so latest status and 10-point trends remain populated.
 func (s *Store) PruneOldRuns(ctx context.Context, retention time.Duration, keepPerTarget int) (int64, error) {
+	if s.readonly != nil {
+		return 0, ErrReadOnly
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -737,7 +766,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 		ORDER BY p.name ASC;
 	`
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
@@ -805,7 +834,7 @@ func (s *Store) ListTargets(ctx context.Context, projectFilter string) ([]Target
 	}
 	baseQuery += ` ORDER BY project_name ASC, package ASC, target_name ASC`
 
-	rows, err := s.db.QueryContext(ctx, baseQuery, args...)
+	rows, err := s.query(ctx, baseQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list targets: %w", err)
 	}
@@ -874,7 +903,7 @@ func (s *Store) ListRuns(ctx context.Context, targetFilter string, limit int) ([
 	}
 	query += fmt.Sprintf(` ORDER BY r.started DESC, r.id DESC LIMIT %d`, limit)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list runs: %w", err)
 	}
@@ -931,7 +960,7 @@ func (s *Store) ListCrashes(ctx context.Context, openOnly bool, targetFilter str
 	}
 	query += ` ORDER BY c.last_seen DESC, c.id DESC`
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list crashes: %w", err)
 	}
@@ -995,7 +1024,7 @@ func (s *Store) GetCoverageHistory(ctx context.Context, targetFilter string, lim
 		ORDER BY started ASC, run_id ASC
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, targetFilter, targetFilter, targetFilter, limit)
+	rows, err := s.query(ctx, query, targetFilter, targetFilter, targetFilter, limit)
 	if err != nil {
 		return nil, fmt.Errorf("get coverage history: %w", err)
 	}
@@ -1026,16 +1055,16 @@ func (s *Store) GetFleetStats(ctx context.Context) (FleetStats, error) {
 	var stats FleetStats
 	since := time.Now().UTC().Add(-24 * time.Hour)
 
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&stats.TotalProjects); err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM projects`).Scan(&stats.TotalProjects); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM targets WHERE COALESCE(active, TRUE) = TRUE`).Scan(&stats.TotalTargets); err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM targets WHERE COALESCE(active, TRUE) = TRUE`).Scan(&stats.TotalTargets); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM crashes WHERE fixed_at IS NULL`).Scan(&stats.OpenCrashes); err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM crashes WHERE fixed_at IS NULL`).Scan(&stats.OpenCrashes); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.queryRow(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(execs), 0), COALESCE(AVG(CASE WHEN execs_per_sec > 0 THEN execs_per_sec END), 0.0) FROM runs WHERE started >= ?`,
 		since,
 	).Scan(&stats.RunsLast24h, &stats.ExecsLast24h, &stats.AvgExecsSec); err != nil {

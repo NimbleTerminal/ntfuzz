@@ -23,9 +23,10 @@ type WorkerStatusProvider interface {
 
 // Server exposes the JSON HTTP API under /api/*.
 type Server struct {
-	store   *store.Store
-	workers WorkerStatusProvider
-	mux     *http.ServeMux
+	store    *store.Store
+	workers  WorkerStatusProvider
+	mux      *http.ServeMux
+	snapshot *store.Snapshot
 }
 
 // NewServer creates a new API server backed by the given DuckDB store and optional worker status provider.
@@ -39,12 +40,21 @@ func NewServer(st *store.Store, workers WorkerStatusProvider) *Server {
 	return s
 }
 
+// NewSnapshotServer exposes only read operations; no writer or orchestrator is attached.
+func NewSnapshotServer(st *store.Store, snapshot store.Snapshot) *Server {
+	s := &Server{store: st, snapshot: &snapshot, mux: http.NewServeMux()}
+	s.routes()
+	return s
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/projects", s.handleProjects)
 	s.mux.HandleFunc("GET /api/targets", s.handleTargets)
 	s.mux.HandleFunc("GET /api/runs", s.handleRuns)
 	s.mux.HandleFunc("GET /api/crashes", s.handleCrashes)
-	s.mux.HandleFunc("POST /api/crashes/{id}/fix", s.handleFixCrash)
+	if s.snapshot == nil {
+		s.mux.HandleFunc("POST /api/crashes/{id}/fix", s.handleFixCrash)
+	}
 	s.mux.HandleFunc("GET /api/coverage/history", s.handleCoverageHistory)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
 }
@@ -226,6 +236,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		SchemaVersion: stats.SchemaVersion,
 		ActiveJobs:    activeJobs,
 		UpdatedAt:     time.Now().UTC(),
+	}
+	if s.snapshot != nil {
+		resp.ReadOnly = true
+		resp.SnapshotAt = &s.snapshot.PublishedAt
+		resp.UpdatedAt = s.snapshot.PublishedAt
+		resp.FleetHealth = "snapshot"
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -174,6 +174,25 @@ func TestBoobaTerminalActionsSnapshot(t *testing.T) {
 	}
 }
 
+func TestReadOnlyViewerDisablesMutations(t *testing.T) {
+	m := NewModelOptions(nil, time.Second, true)
+	m.mode = ViewCrashes
+	m.openCrashes = []api.Crash{{ID: 1}}
+	if m.keyMap().FixCrash.Enabled() {
+		t.Fatal("fix key is enabled")
+	}
+	_, command := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if command != nil {
+		t.Fatal("read-only key generated a command")
+	}
+	if strings.Contains(m.renderCrashesView(), "mark selected crash fixed") {
+		t.Fatal("read-only help advertises mutation")
+	}
+	if !strings.Contains(m.renderHeader(), "read-only") {
+		t.Fatal("snapshot mode is not visible")
+	}
+}
+
 func TestLayoutTracksWindowWidth(t *testing.T) {
 	m := NewModel(nil, time.Second)
 	for _, width := range []int{130, 74, 60, 163} {
@@ -188,6 +207,19 @@ func TestLayoutTracksWindowWidth(t *testing.T) {
 			if got := lipgloss.Width(view); got > width {
 				t.Errorf("%s width = %d after resize to %d", name, got, width)
 			}
+		}
+	}
+}
+
+func TestSnapshotHeaderTracksWindowWidth(t *testing.T) {
+	m := NewModelOptions(nil, time.Second, true)
+	at := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	m.status.SnapshotAt = &at
+	for _, width := range []int{130, 74, 60, 40} {
+		next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+		m = next.(Model)
+		if got := lipgloss.Width(m.renderHeader()); got > width {
+			t.Errorf("snapshot header width=%d after resize to %d", got, width)
 		}
 	}
 }
