@@ -29,8 +29,10 @@ tasks:
       - NTFUZZ_E2E=1 go test -v ./internal/orchestrator -run TestLocalRunnerEndToEnd
 
   lint:
-    desc: Run golangci-lint across the codebase
+    desc: Run gofmt check, go vet, and golangci-lint across the codebase
     cmds:
+      - test -z "$(gofmt -l .)"
+      - go vet ./...
       - golangci-lint run ./...
 
   ci:

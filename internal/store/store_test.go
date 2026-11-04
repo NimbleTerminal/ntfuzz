@@ -252,4 +252,3 @@ func TestStorePruneOldRuns(t *testing.T) {
 		t.Fatalf("expected 3 runs remaining (keepPerTarget=3), got %d", len(remaining))
 	}
 }
-
