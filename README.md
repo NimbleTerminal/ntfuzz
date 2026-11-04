@@ -1,4 +1,4 @@
-# ntfuzz (`ntfuzzy`)
+# ntfuzz
 
 `ntfuzz` is a single-binary continuous fuzzing orchestrator for Go repositories, backed by **DuckDB** (`duckdb-go/v2`) and a **Bubble Tea v2** TUI dashboard served both natively in your terminal and in the browser via **Booba** (`go-booba` + Ghostty/`ntwebterm`).
 
@@ -123,3 +123,10 @@ projects:
 | `?` | Full help | Expand/collapse full keybinding help |
 | `h` | Hide/Show help | Toggle in-terminal help footer |
 | `q` / `ctrl+c` | Quit | Exit the TUI client |
+
+---
+
+## License
+
+Released under the [MIT License](./LICENSE).
+
