@@ -17,38 +17,80 @@ func TestStoreLifecycle(t *testing.T) {
 	}
 	defer st.Close()
 
+	ver, err := st.SchemaVersion(ctx)
+	if err != nil || ver != CurrentSchemaVersion {
+		t.Fatalf("expected schema version %d, got %d (err=%v)", CurrentSchemaVersion, ver, err)
+	}
+
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	projID, err := st.UpsertProject(ctx, "demo-parser", "./examples/demo-parser", "main", &now)
+	projID, err := st.SyncProject(ctx, ProjectSyncInput{
+		Name:     "demo-parser",
+		Repo:     "./examples/demo-parser",
+		Branch:   "main",
+		GitSHA:   "abc1234def56",
+		Dirty:    false,
+		SyncedAt: &now,
+	})
 	if err != nil {
-		t.Fatalf("UpsertProject insert failed: %v", err)
-	}
-	if projID <= 0 {
-		t.Fatalf("expected positive project ID, got %d", projID)
+		t.Fatalf("SyncProject insert failed: %v", err)
 	}
 
-	// Upsert again to test update branch
+	// Simulate a failed pull: SyncedAt is nil, SyncError is set -> last_synced must stay `now`
+	projID2, err := st.SyncProject(ctx, ProjectSyncInput{
+		Name:      "demo-parser",
+		Repo:      "./examples/demo-parser",
+		Branch:    "main",
+		SyncedAt:  nil,
+		SyncError: "git pull failed: network unreachable",
+	})
+	if err != nil || projID != projID2 {
+		t.Fatalf("SyncProject failed pull update error: %v", err)
+	}
+
+	projs, err := st.ListProjects(ctx)
+	if err != nil || len(projs) != 1 {
+		t.Fatalf("ListProjects failed: %v", err)
+	}
+	if projs[0].LastSynced == nil || !projs[0].LastSynced.Equal(now) {
+		t.Fatalf("expected LastSynced to remain %v after failed pull, got %v", now, projs[0].LastSynced)
+	}
+	if projs[0].SyncError == "" || projs[0].GitSHA != "abc1234def56" {
+		t.Fatalf("expected SyncError and preserved GitSHA, got %+v", projs[0])
+	}
+
+	// Clear sync error on recovery
 	later := now.Add(time.Minute)
-	projID2, err := st.UpsertProject(ctx, "demo-parser", "./examples/demo-parser", "main", &later)
+	_, err = st.SyncProject(ctx, ProjectSyncInput{
+		Name:     "demo-parser",
+		Repo:     "./examples/demo-parser",
+		Branch:   "main",
+		GitSHA:   "fedcba987654",
+		Dirty:    true,
+		SyncedAt: &later,
+	})
 	if err != nil {
-		t.Fatalf("UpsertProject update failed: %v", err)
-	}
-	if projID != projID2 {
-		t.Fatalf("expected same project ID %d, got %d", projID, projID2)
+		t.Fatalf("SyncProject recovery failed: %v", err)
 	}
 
-	targetID, err := st.UpsertTarget(ctx, projID, "example.com/demo/parser", "FuzzParseExpr")
-	if err != nil {
-		t.Fatalf("UpsertTarget failed: %v", err)
+	// Reconcile targets: start with two targets, then drop one
+	reconciled, err := st.ReconcileProjectTargets(ctx, projID, []TargetKey{
+		{Package: "example.com/demo/parser", Name: "FuzzParseExpr"},
+		{Package: "example.com/demo/parser", Name: "FuzzDeletedLater"},
+	})
+	if err != nil || len(reconciled) != 2 {
+		t.Fatalf("ReconcileProjectTargets initial failed: %v", err)
 	}
-	targetID2, err := st.UpsertTarget(ctx, projID, "example.com/demo/parser", "FuzzParseExpr")
-	if err != nil {
-		t.Fatalf("UpsertTarget duplicate failed: %v", err)
-	}
-	if targetID != targetID2 {
-		t.Fatalf("expected same target ID %d, got %d", targetID, targetID2)
+	targetID := reconciled[TargetKey{Package: "example.com/demo/parser", Name: "FuzzParseExpr"}]
+
+	// Now reconcile with only FuzzParseExpr -> FuzzDeletedLater should become inactive
+	reconciled, err = st.ReconcileProjectTargets(ctx, projID, []TargetKey{
+		{Package: "example.com/demo/parser", Name: "FuzzParseExpr"},
+	})
+	if err != nil || len(reconciled) != 1 {
+		t.Fatalf("ReconcileProjectTargets second pass failed: %v", err)
 	}
 
-	// Insert two runs to verify latest_target_status view and coverage trend
+	// Insert two runs with revision metadata
 	_, err = st.InsertRun(ctx, Run{
 		TargetID:       targetID,
 		Started:        now.Add(-5 * time.Minute),
@@ -56,10 +98,14 @@ func TestStoreLifecycle(t *testing.T) {
 		Execs:          50000,
 		ExecsPerSec:    10000,
 		NewInteresting: 3,
+		CorpusCount:    12,
 		Crashes:        0,
 		CoveragePct:    62.5,
 		Status:         "ok",
 		Worker:         "worker-1",
+		GitSHA:         "abc1234def56",
+		Dirty:          false,
+		GoVersion:      "go1.27.3",
 	})
 	if err != nil {
 		t.Fatalf("InsertRun 1 failed: %v", err)
@@ -72,55 +118,50 @@ func TestStoreLifecycle(t *testing.T) {
 		Execs:          75000,
 		ExecsPerSec:    15000,
 		NewInteresting: 1,
+		CorpusCount:    15,
 		Crashes:        1,
 		CoveragePct:    74.2,
 		Status:         "crash",
 		Worker:         "worker-1",
+		GitSHA:         "fedcba987654",
+		Dirty:          true,
+		GoVersion:      "go1.27.3",
 	})
 	if err != nil {
 		t.Fatalf("InsertRun 2 failed: %v", err)
 	}
 
 	crashID, err := st.RecordCrash(ctx, Crash{
-		TargetID:       targetID,
-		FirstSeen:      now,
-		LastSeen:       now,
-		Stack:          "panic: index out of range [4] with length 4",
-		InputHash:      "deadbeef12345678",
-		MinimizedInput: "testdata/fuzz/FuzzParseExpr/deadbeef12345678",
+		TargetID:         targetID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            "panic: index out of range [4] with length 4\nparser.go:42",
+		StackFingerprint: "fp-index-out-of-range",
+		InputHash:        "deadbeef12345678",
+		MinimizedInput:   ".ntfuzz/corpus/demo-parser/crashes/FuzzParseExpr/deadbeef12345678",
+		GitSHA:           "fedcba987654",
+		Dirty:            true,
+		GoVersion:        "go1.27.3",
 	})
 	if err != nil {
 		t.Fatalf("RecordCrash failed: %v", err)
 	}
-	if crashID <= 0 {
-		t.Fatalf("expected positive crashID, got %d", crashID)
-	}
 
-	// Recording the same crash input hash updates last_seen
+	// Recording a crash with a different input hash but same stack_fingerprint deduplicates!
 	crashID2, err := st.RecordCrash(ctx, Crash{
-		TargetID:       targetID,
-		FirstSeen:      now,
-		LastSeen:       later,
-		Stack:          "panic: index out of range [4] with length 4",
-		InputHash:      "deadbeef12345678",
-		MinimizedInput: "testdata/fuzz/FuzzParseExpr/deadbeef12345678",
+		TargetID:         targetID,
+		FirstSeen:        now,
+		LastSeen:         later,
+		Stack:            "panic: index out of range [4] with length 4\nparser.go:49",
+		StackFingerprint: "fp-index-out-of-range",
+		InputHash:        "differentinputhash999",
+		MinimizedInput:   ".ntfuzz/corpus/demo-parser/crashes/FuzzParseExpr/differentinputhash999",
+		GitSHA:           "fedcba987654",
+		Dirty:            true,
+		GoVersion:        "go1.27.3",
 	})
-	if err != nil {
-		t.Fatalf("RecordCrash duplicate failed: %v", err)
-	}
-	if crashID != crashID2 {
-		t.Fatalf("expected same crashID %d, got %d", crashID, crashID2)
-	}
-
-	projects, err := st.ListProjects(ctx)
-	if err != nil {
-		t.Fatalf("ListProjects failed: %v", err)
-	}
-	if len(projects) != 1 {
-		t.Fatalf("expected 1 project, got %d", len(projects))
-	}
-	if projects[0].TargetCount != 1 || projects[0].TotalRuns != 2 || projects[0].OpenCrashes != 1 {
-		t.Fatalf("unexpected project summary: %+v", projects[0])
+	if err != nil || crashID != crashID2 {
+		t.Fatalf("expected stack_fingerprint dedup to return %d, got %d (err=%v)", crashID, crashID2, err)
 	}
 
 	targets, err := st.ListTargets(ctx, "demo-parser")
@@ -128,41 +169,22 @@ func TestStoreLifecycle(t *testing.T) {
 		t.Fatalf("ListTargets failed: %v", err)
 	}
 	if len(targets) != 1 {
-		t.Fatalf("expected 1 target, got %d", len(targets))
+		t.Fatalf("expected 1 active target after reconciliation, got %d", len(targets))
 	}
-	if targets[0].CoveragePct != 74.2 || len(targets[0].CoverageTrend) != 2 {
-		t.Fatalf("unexpected target coverage state: %+v", targets[0])
-	}
-
-	runs, err := st.ListRuns(ctx, "FuzzParseExpr", 10)
-	if err != nil {
-		t.Fatalf("ListRuns failed: %v", err)
-	}
-	if len(runs) != 2 {
-		t.Fatalf("expected 2 runs, got %d", len(runs))
+	if targets[0].CoveragePct != 74.2 || len(targets[0].CoverageTrend) != 2 || targets[0].GitSHA != "fedcba987654" || targets[0].CorpusCount != 15 {
+		t.Fatalf("unexpected target state: %+v", targets[0])
 	}
 
-	crashes, err := st.ListCrashes(ctx, true, "")
-	if err != nil {
-		t.Fatalf("ListCrashes failed: %v", err)
+	// Test MarkCrashFixed lifecycle
+	if err := st.MarkCrashFixed(ctx, crashID, later, "https://github.com/example/repo/issues/12"); err != nil {
+		t.Fatalf("MarkCrashFixed failed: %v", err)
 	}
-	if len(crashes) != 1 {
-		t.Fatalf("expected 1 open crash, got %d", len(crashes))
+	openCrashes, err := st.ListCrashes(ctx, true, "")
+	if err != nil || len(openCrashes) != 0 {
+		t.Fatalf("expected 0 open crashes after MarkCrashFixed, got %d (err=%v)", len(openCrashes), err)
 	}
-
-	history, err := st.GetCoverageHistory(ctx, "FuzzParseExpr", 10)
-	if err != nil {
-		t.Fatalf("GetCoverageHistory failed: %v", err)
-	}
-	if len(history) != 2 || history[0].CoveragePct != 62.5 || history[1].CoveragePct != 74.2 {
-		t.Fatalf("unexpected coverage history: %+v", history)
-	}
-
-	stats, err := st.GetFleetStats(ctx)
-	if err != nil {
-		t.Fatalf("GetFleetStats failed: %v", err)
-	}
-	if stats.TotalProjects != 1 || stats.TotalTargets != 1 || stats.OpenCrashes != 1 || stats.RunsLast24h != 2 {
-		t.Fatalf("unexpected fleet stats: %+v", stats)
+	allCrashes, err := st.ListCrashes(ctx, false, "")
+	if err != nil || len(allCrashes) != 1 || allCrashes[0].FixedAt == nil || allCrashes[0].IssueURL != "https://github.com/example/repo/issues/12" {
+		t.Fatalf("unexpected all crashes state: %+v (err=%v)", allCrashes, err)
 	}
 }

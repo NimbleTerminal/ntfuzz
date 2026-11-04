@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,18 +13,41 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 )
 
+// CurrentSchemaVersion tracks the DuckDB schema version.
+const CurrentSchemaVersion = 2
+
 // Store manages persistence of fuzzing projects, targets, runs, and crashes in DuckDB.
 type Store struct {
 	db *sql.DB
 	mu sync.Mutex
 }
 
-// Project represents a fuzzing project with aggregated status metadata.
+// ProjectSyncInput carries repository checkout metadata when syncing a project.
+type ProjectSyncInput struct {
+	Name      string
+	Repo      string
+	Branch    string
+	GitSHA    string
+	Dirty     bool
+	SyncedAt  *time.Time
+	SyncError string
+}
+
+// TargetKey identifies a discovered target within a project.
+type TargetKey struct {
+	Package string
+	Name    string
+}
+
+// Project represents a fuzzing project with aggregated status and revision metadata.
 type Project struct {
 	ID             int64      `json:"id"`
 	Name           string     `json:"name"`
 	Repo           string     `json:"repo"`
 	Branch         string     `json:"branch,omitempty"`
+	GitSHA         string     `json:"git_sha,omitempty"`
+	Dirty          bool       `json:"dirty"`
+	SyncError      string     `json:"sync_error,omitempty"`
 	LastSynced     *time.Time `json:"last_synced,omitempty"`
 	TargetCount    int        `json:"target_count"`
 	TotalRuns      int        `json:"total_runs"`
@@ -34,29 +58,34 @@ type Project struct {
 	AvgCoveragePct float64    `json:"avg_coverage_pct"`
 }
 
-// Target represents a discovered Go fuzz target and its latest run status.
+// Target represents an active Go fuzz target and its latest run status.
 type Target struct {
 	ID             int64      `json:"id"`
 	ProjectID      int64      `json:"project_id"`
 	ProjectName    string     `json:"project_name"`
 	Package        string     `json:"package"`
 	Name           string     `json:"name"`
+	Active         bool       `json:"active"`
 	LastRunID      *int64     `json:"last_run_id,omitempty"`
 	LastStarted    *time.Time `json:"last_started,omitempty"`
 	DurationSec    float64    `json:"duration_sec"`
 	Execs          int64      `json:"execs"`
 	ExecsPerSec    float64    `json:"execs_per_sec"`
 	NewInteresting int        `json:"new_interesting"`
+	CorpusCount    int        `json:"corpus_count"`
 	Crashes        int        `json:"crashes"`
 	CoveragePct    float64    `json:"coverage_pct"`
 	Status         string     `json:"status"`
 	Worker         string     `json:"worker"`
+	GitSHA         string     `json:"git_sha,omitempty"`
+	Dirty          bool       `json:"dirty"`
+	GoVersion      string     `json:"go_version,omitempty"`
 	OpenCrashes    int        `json:"open_crashes"`
 	TotalRuns      int        `json:"total_runs"`
 	CoverageTrend  []float64  `json:"coverage_trend"`
 }
 
-// Run represents a single execution of a fuzz target.
+// Run represents a single execution of a fuzz target tied to a code revision.
 type Run struct {
 	ID             int64     `json:"id"`
 	TargetID       int64     `json:"target_id"`
@@ -68,29 +97,37 @@ type Run struct {
 	Execs          int64     `json:"execs"`
 	ExecsPerSec    float64   `json:"execs_per_sec"`
 	NewInteresting int       `json:"new_interesting"`
+	CorpusCount    int       `json:"corpus_count"`
 	Crashes        int       `json:"crashes"`
 	CoveragePct    float64   `json:"coverage_pct"`
 	Status         string    `json:"status"`
 	Worker         string    `json:"worker"`
+	GitSHA         string    `json:"git_sha,omitempty"`
+	Dirty          bool      `json:"dirty"`
+	GoVersion      string    `json:"go_version,omitempty"`
 }
 
 // Crash represents a fuzzing crash record stored in DuckDB.
 type Crash struct {
-	ID             int64      `json:"id"`
-	TargetID       int64      `json:"target_id"`
-	ProjectName    string     `json:"project_name,omitempty"`
-	Package        string     `json:"package,omitempty"`
-	TargetName     string     `json:"target_name,omitempty"`
-	FirstSeen      time.Time  `json:"first_seen"`
-	LastSeen       time.Time  `json:"last_seen"`
-	FixedAt        *time.Time `json:"fixed_at,omitempty"`
-	Stack          string     `json:"stack"`
-	InputHash      string     `json:"input_hash"`
-	MinimizedInput string     `json:"minimized_input"`
-	IssueURL       string     `json:"issue_url"`
+	ID               int64      `json:"id"`
+	TargetID         int64      `json:"target_id"`
+	ProjectName      string     `json:"project_name,omitempty"`
+	Package          string     `json:"package,omitempty"`
+	TargetName       string     `json:"target_name,omitempty"`
+	FirstSeen        time.Time  `json:"first_seen"`
+	LastSeen         time.Time  `json:"last_seen"`
+	FixedAt          *time.Time `json:"fixed_at,omitempty"`
+	Stack            string     `json:"stack"`
+	StackFingerprint string     `json:"stack_fingerprint,omitempty"`
+	InputHash        string     `json:"input_hash"`
+	MinimizedInput   string     `json:"minimized_input"`
+	IssueURL         string     `json:"issue_url"`
+	GitSHA           string     `json:"git_sha,omitempty"`
+	Dirty            bool       `json:"dirty"`
+	GoVersion        string     `json:"go_version,omitempty"`
 }
 
-// CoveragePoint represents a point in a target's coverage and throughput history.
+// CoveragePoint represents a point in a target's coverage and corpus history.
 type CoveragePoint struct {
 	RunID          int64     `json:"run_id"`
 	TargetID       int64     `json:"target_id"`
@@ -98,6 +135,8 @@ type CoveragePoint struct {
 	CoveragePct    float64   `json:"coverage_pct"`
 	ExecsPerSec    float64   `json:"execs_per_sec"`
 	NewInteresting int       `json:"new_interesting"`
+	CorpusCount    int       `json:"corpus_count"`
+	GitSHA         string    `json:"git_sha,omitempty"`
 }
 
 // FleetStats summarizes overall store statistics for /api/status.
@@ -108,10 +147,11 @@ type FleetStats struct {
 	RunsLast24h   int     `json:"runs_last_24h"`
 	ExecsLast24h  int64   `json:"execs_last_24h"`
 	AvgExecsSec   float64 `json:"avg_execs_per_sec"`
+	SchemaVersion int     `json:"schema_version"`
 }
 
 // Open opens or creates a DuckDB database at path (use "" or ":memory:" for in-memory)
-// and runs schema migrations.
+// and runs versioned schema migrations.
 func Open(path string) (*Store, error) {
 	if path == ":memory:" {
 		path = ""
@@ -138,64 +178,149 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// Migrate creates all required tables, sequences, indexes, and views if they do not exist.
+// SchemaVersion returns the currently applied schema version in DuckDB.
+func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.schemaVersionLocked(ctx)
+}
+
+func (s *Store) schemaVersionLocked(ctx context.Context) (int, error) {
+	var v int
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&v)
+	if err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+// Migrate creates or upgrades all required tables, sequences, indexes, and views using versioned migrations.
 func (s *Store) Migrate(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stmts := []string{
-		`CREATE SEQUENCE IF NOT EXISTS seq_projects START 1;`,
-		`CREATE SEQUENCE IF NOT EXISTS seq_targets START 1;`,
-		`CREATE SEQUENCE IF NOT EXISTS seq_runs START 1;`,
-		`CREATE SEQUENCE IF NOT EXISTS seq_crashes START 1;`,
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			applied_at TIMESTAMP NOT NULL
+		);
+	`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
 
-		`CREATE TABLE IF NOT EXISTS projects (
-			id BIGINT PRIMARY KEY DEFAULT nextval('seq_projects'),
-			name VARCHAR NOT NULL UNIQUE,
-			repo VARCHAR NOT NULL,
-			branch VARCHAR DEFAULT '',
-			last_synced TIMESTAMP
-		);`,
+	currentVersion, err := s.schemaVersionLocked(ctx)
+	if err != nil {
+		return fmt.Errorf("check schema version: %w", err)
+	}
 
-		`CREATE TABLE IF NOT EXISTS targets (
-			id BIGINT PRIMARY KEY DEFAULT nextval('seq_targets'),
-			project_id BIGINT NOT NULL,
-			package VARCHAR NOT NULL,
-			name VARCHAR NOT NULL,
-			UNIQUE(project_id, package, name)
-		);`,
+	type migration struct {
+		version int
+		stmts   []string
+	}
 
-		`CREATE TABLE IF NOT EXISTS runs (
-			id BIGINT PRIMARY KEY DEFAULT nextval('seq_runs'),
-			target_id BIGINT NOT NULL,
-			started TIMESTAMP NOT NULL,
-			duration_sec DOUBLE NOT NULL,
-			execs BIGINT NOT NULL,
-			execs_per_sec DOUBLE NOT NULL,
-			new_interesting INTEGER NOT NULL,
-			crashes INTEGER NOT NULL,
-			coverage_pct DOUBLE NOT NULL,
-			status VARCHAR NOT NULL,
-			worker VARCHAR NOT NULL
-		);`,
+	migrations := []migration{
+		{
+			version: 1,
+			stmts: []string{
+				`CREATE SEQUENCE IF NOT EXISTS seq_projects START 1;`,
+				`CREATE SEQUENCE IF NOT EXISTS seq_targets START 1;`,
+				`CREATE SEQUENCE IF NOT EXISTS seq_runs START 1;`,
+				`CREATE SEQUENCE IF NOT EXISTS seq_crashes START 1;`,
 
-		`CREATE TABLE IF NOT EXISTS crashes (
-			id BIGINT PRIMARY KEY DEFAULT nextval('seq_crashes'),
-			target_id BIGINT NOT NULL,
-			first_seen TIMESTAMP NOT NULL,
-			last_seen TIMESTAMP NOT NULL,
-			fixed_at TIMESTAMP,
-			stack VARCHAR NOT NULL,
-			input_hash VARCHAR NOT NULL,
-			minimized_input VARCHAR NOT NULL,
-			issue_url VARCHAR DEFAULT ''
-		);`,
+				`CREATE TABLE IF NOT EXISTS projects (
+					id BIGINT PRIMARY KEY DEFAULT nextval('seq_projects'),
+					name VARCHAR NOT NULL UNIQUE,
+					repo VARCHAR NOT NULL,
+					branch VARCHAR DEFAULT '',
+					last_synced TIMESTAMP
+				);`,
 
-		`CREATE INDEX IF NOT EXISTS idx_targets_project_id ON targets(project_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_runs_target_started ON runs(target_id, started);`,
-		`CREATE INDEX IF NOT EXISTS idx_crashes_target_id ON crashes(target_id);`,
+				`CREATE TABLE IF NOT EXISTS targets (
+					id BIGINT PRIMARY KEY DEFAULT nextval('seq_targets'),
+					project_id BIGINT NOT NULL,
+					package VARCHAR NOT NULL,
+					name VARCHAR NOT NULL,
+					UNIQUE(project_id, package, name)
+				);`,
 
-		`CREATE OR REPLACE VIEW latest_target_status AS
+				`CREATE TABLE IF NOT EXISTS runs (
+					id BIGINT PRIMARY KEY DEFAULT nextval('seq_runs'),
+					target_id BIGINT NOT NULL,
+					started TIMESTAMP NOT NULL,
+					duration_sec DOUBLE NOT NULL,
+					execs BIGINT NOT NULL,
+					execs_per_sec DOUBLE NOT NULL,
+					new_interesting INTEGER NOT NULL,
+					crashes INTEGER NOT NULL,
+					coverage_pct DOUBLE NOT NULL,
+					status VARCHAR NOT NULL,
+					worker VARCHAR NOT NULL
+				);`,
+
+				`CREATE TABLE IF NOT EXISTS crashes (
+					id BIGINT PRIMARY KEY DEFAULT nextval('seq_crashes'),
+					target_id BIGINT NOT NULL,
+					first_seen TIMESTAMP NOT NULL,
+					last_seen TIMESTAMP NOT NULL,
+					fixed_at TIMESTAMP,
+					stack VARCHAR NOT NULL,
+					input_hash VARCHAR NOT NULL,
+					minimized_input VARCHAR NOT NULL,
+					issue_url VARCHAR DEFAULT ''
+				);`,
+
+				`CREATE INDEX IF NOT EXISTS idx_targets_project_id ON targets(project_id);`,
+				`CREATE INDEX IF NOT EXISTS idx_runs_target_started ON runs(target_id, started);`,
+				`CREATE INDEX IF NOT EXISTS idx_crashes_target_id ON crashes(target_id);`,
+			},
+		},
+		{
+			version: 2,
+			stmts: []string{
+				// Revision & sync health columns on projects
+				`ALTER TABLE projects ADD COLUMN IF NOT EXISTS git_sha VARCHAR DEFAULT '';`,
+				`ALTER TABLE projects ADD COLUMN IF NOT EXISTS dirty BOOLEAN DEFAULT FALSE;`,
+				`ALTER TABLE projects ADD COLUMN IF NOT EXISTS sync_error VARCHAR DEFAULT '';`,
+
+				// Active lifecycle column on targets for reconciliation
+				`ALTER TABLE targets ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;`,
+
+				// Revision, toolchain, and corpus size columns on runs
+				`ALTER TABLE runs ADD COLUMN IF NOT EXISTS corpus_count INTEGER DEFAULT 0;`,
+				`ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_sha VARCHAR DEFAULT '';`,
+				`ALTER TABLE runs ADD COLUMN IF NOT EXISTS dirty BOOLEAN DEFAULT FALSE;`,
+				`ALTER TABLE runs ADD COLUMN IF NOT EXISTS go_version VARCHAR DEFAULT '';`,
+
+				// Revision, toolchain, and normalized stack fingerprint on crashes
+				`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS stack_fingerprint VARCHAR DEFAULT '';`,
+				`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS git_sha VARCHAR DEFAULT '';`,
+				`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS dirty BOOLEAN DEFAULT FALSE;`,
+				`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS go_version VARCHAR DEFAULT '';`,
+			},
+		},
+	}
+
+	now := time.Now().UTC()
+	for _, m := range migrations {
+		if m.version <= currentVersion {
+			continue
+		}
+		for _, stmt := range m.stmts {
+			if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("migration v%d (%q): %w", m.version, stmt, err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
+			m.version, now,
+		); err != nil {
+			return fmt.Errorf("record migration v%d: %w", m.version, err)
+		}
+	}
+
+	// Always ensure the view reflects the latest schema and folds the last-10 coverage trend into a single query.
+	viewStmt := `
+		CREATE OR REPLACE VIEW latest_target_status AS
 		WITH ranked_runs AS (
 			SELECT
 				r.id AS run_id,
@@ -205,16 +330,28 @@ func (s *Store) Migrate(ctx context.Context) error {
 				r.execs,
 				r.execs_per_sec,
 				r.new_interesting,
+				COALESCE(r.corpus_count, 0) AS corpus_count,
 				r.crashes,
 				r.coverage_pct,
 				r.status,
 				r.worker,
+				COALESCE(r.git_sha, '') AS git_sha,
+				COALESCE(r.dirty, FALSE) AS dirty,
+				COALESCE(r.go_version, '') AS go_version,
 				ROW_NUMBER() OVER (PARTITION BY r.target_id ORDER BY r.started DESC, r.id DESC) AS rn
 			FROM runs r
 		),
 		run_counts AS (
 			SELECT target_id, COUNT(*) AS total_runs
 			FROM runs
+			GROUP BY target_id
+		),
+		trend_per_target AS (
+			SELECT
+				target_id,
+				CAST(to_json(LIST(coverage_pct ORDER BY started ASC, run_id ASC)) AS VARCHAR) AS coverage_trend_json
+			FROM ranked_runs
+			WHERE rn <= 10
 			GROUP BY target_id
 		),
 		open_crash_counts AS (
@@ -229,88 +366,117 @@ func (s *Store) Migrate(ctx context.Context) error {
 			p.name AS project_name,
 			t.package,
 			t.name AS target_name,
+			COALESCE(t.active, TRUE) AS active,
 			rr.run_id AS last_run_id,
 			rr.started AS last_started,
 			COALESCE(rr.duration_sec, 0.0) AS duration_sec,
 			COALESCE(rr.execs, 0) AS execs,
 			COALESCE(rr.execs_per_sec, 0.0) AS execs_per_sec,
 			COALESCE(rr.new_interesting, 0) AS new_interesting,
+			COALESCE(rr.corpus_count, 0) AS corpus_count,
 			COALESCE(rr.crashes, 0) AS crashes,
 			COALESCE(rr.coverage_pct, 0.0) AS coverage_pct,
 			COALESCE(rr.status, 'pending') AS status,
 			COALESCE(rr.worker, '') AS worker,
+			COALESCE(rr.git_sha, COALESCE(p.git_sha, '')) AS git_sha,
+			COALESCE(rr.dirty, COALESCE(p.dirty, FALSE)) AS dirty,
+			COALESCE(rr.go_version, '') AS go_version,
 			COALESCE(oc.open_crashes, 0) AS open_crashes,
-			COALESCE(rc.total_runs, 0) AS total_runs
+			COALESCE(rc.total_runs, 0) AS total_runs,
+			COALESCE(tr.coverage_trend_json, '[]') AS coverage_trend_json
 		FROM targets t
 		JOIN projects p ON p.id = t.project_id
 		LEFT JOIN ranked_runs rr ON rr.target_id = t.id AND rr.rn = 1
 		LEFT JOIN open_crash_counts oc ON oc.target_id = t.id
-		LEFT JOIN run_counts rc ON rc.target_id = t.id;`,
-	}
-
-	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("exec migration %q: %w", stmt, err)
-		}
+		LEFT JOIN run_counts rc ON rc.target_id = t.id
+		LEFT JOIN trend_per_target tr ON tr.target_id = t.id
+		WHERE COALESCE(t.active, TRUE) = TRUE;
+	`
+	if _, err := s.db.ExecContext(ctx, viewStmt); err != nil {
+		return fmt.Errorf("create view latest_target_status: %w", err)
 	}
 	return nil
 }
 
-// UpsertProject creates or updates a project by name and returns its ID.
+// UpsertProject creates or updates a project by name (preserving compatibility with simple callers).
 func (s *Store) UpsertProject(ctx context.Context, name, repo, branch string, syncedAt *time.Time) (int64, error) {
+	return s.SyncProject(ctx, ProjectSyncInput{
+		Name:     name,
+		Repo:     repo,
+		Branch:   branch,
+		SyncedAt: syncedAt,
+	})
+}
+
+// SyncProject records project checkout state, revision (git_sha + dirty), and any sync error.
+// If in.SyncedAt is nil (e.g. a failed git pull), last_synced is NOT advanced, and sync_error is recorded.
+func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var id int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE name = ?`, name).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE name = ?`, in.Name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		var syncArg any
-		if syncedAt != nil {
-			syncArg = syncedAt.UTC()
+		if in.SyncedAt != nil {
+			syncArg = in.SyncedAt.UTC()
 		}
 		err = s.db.QueryRowContext(ctx,
-			`INSERT INTO projects (name, repo, branch, last_synced) VALUES (?, ?, ?, ?) RETURNING id`,
-			name, repo, branch, syncArg,
+			`INSERT INTO projects (name, repo, branch, last_synced, git_sha, dirty, sync_error)
+			 VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+			in.Name, in.Repo, in.Branch, syncArg, in.GitSHA, in.Dirty, in.SyncError,
 		).Scan(&id)
 		if err != nil {
-			return 0, fmt.Errorf("insert project %q: %w", name, err)
+			return 0, fmt.Errorf("insert project %q: %w", in.Name, err)
 		}
 		return id, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("query project %q: %w", name, err)
+		return 0, fmt.Errorf("query project %q: %w", in.Name, err)
 	}
 
-	if syncedAt != nil {
+	if in.SyncedAt != nil {
 		_, err = s.db.ExecContext(ctx,
-			`UPDATE projects SET repo = ?, branch = ?, last_synced = ? WHERE id = ?`,
-			repo, branch, syncedAt.UTC(), id,
+			`UPDATE projects
+			 SET repo = ?, branch = ?, last_synced = ?, git_sha = ?, dirty = ?, sync_error = ?
+			 WHERE id = ?`,
+			in.Repo, in.Branch, in.SyncedAt.UTC(), in.GitSHA, in.Dirty, in.SyncError, id,
 		)
 	} else {
+		// Preserve existing last_synced and git_sha if not provided on a failed pull
 		_, err = s.db.ExecContext(ctx,
-			`UPDATE projects SET repo = ?, branch = ? WHERE id = ?`,
-			repo, branch, id,
+			`UPDATE projects
+			 SET repo = ?, branch = ?,
+			     git_sha = CASE WHEN ? != '' THEN ? ELSE git_sha END,
+			     dirty = CASE WHEN ? != '' THEN ? ELSE dirty END,
+			     sync_error = ?
+			 WHERE id = ?`,
+			in.Repo, in.Branch, in.GitSHA, in.GitSHA, in.GitSHA, in.Dirty, in.SyncError, id,
 		)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("update project %q: %w", name, err)
+		return 0, fmt.Errorf("update project %q: %w", in.Name, err)
 	}
 	return id, nil
 }
 
-// UpsertTarget ensures a target (project_id, package, name) exists and returns its ID.
+// UpsertTarget ensures a target (project_id, package, name) exists and is marked active, returning its ID.
 func (s *Store) UpsertTarget(ctx context.Context, projectID int64, pkg, name string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.upsertTargetLocked(ctx, projectID, pkg, name)
+}
 
+func (s *Store) upsertTargetLocked(ctx context.Context, projectID int64, pkg, name string) (int64, error) {
 	var id int64
+	var active sql.NullBool
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM targets WHERE project_id = ? AND package = ? AND name = ?`,
+		`SELECT id, active FROM targets WHERE project_id = ? AND package = ? AND name = ?`,
 		projectID, pkg, name,
-	).Scan(&id)
+	).Scan(&id, &active)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = s.db.QueryRowContext(ctx,
-			`INSERT INTO targets (project_id, package, name) VALUES (?, ?, ?) RETURNING id`,
+			`INSERT INTO targets (project_id, package, name, active) VALUES (?, ?, ?, TRUE) RETURNING id`,
 			projectID, pkg, name,
 		).Scan(&id)
 		if err != nil {
@@ -321,10 +487,58 @@ func (s *Store) UpsertTarget(ctx context.Context, projectID int64, pkg, name str
 	if err != nil {
 		return 0, fmt.Errorf("query target %s.%s: %w", pkg, name, err)
 	}
+	if !active.Valid || !active.Bool {
+		if _, err := s.db.ExecContext(ctx, `UPDATE targets SET active = TRUE WHERE id = ?`, id); err != nil {
+			return 0, fmt.Errorf("reactivate target %d: %w", id, err)
+		}
+	}
 	return id, nil
 }
 
-// InsertRun records a completed fuzz run and returns its new run ID.
+// ReconcileProjectTargets upserts all discovered targets for a project as active=TRUE and
+// marks any previously stored targets for that project that were not discovered as active=FALSE.
+func (s *Store) ReconcileProjectTargets(ctx context.Context, projectID int64, discovered []TargetKey) (map[TargetKey]int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids := make(map[TargetKey]int64, len(discovered))
+	activeIDs := make(map[int64]bool, len(discovered))
+
+	for _, tk := range discovered {
+		id, err := s.upsertTargetLocked(ctx, projectID, tk.Package, tk.Name)
+		if err != nil {
+			return nil, err
+		}
+		ids[tk] = id
+		activeIDs[id] = true
+	}
+
+	// Find any existing active targets for this project that are no longer present
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM targets WHERE project_id = ? AND COALESCE(active, TRUE) = TRUE`,
+		projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query project targets for reconciliation: %w", err)
+	}
+	var staleIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil && !activeIDs[id] {
+			staleIDs = append(staleIDs, id)
+		}
+	}
+	_ = rows.Close()
+
+	for _, staleID := range staleIDs {
+		if _, err := s.db.ExecContext(ctx, `UPDATE targets SET active = FALSE WHERE id = ?`, staleID); err != nil {
+			return nil, fmt.Errorf("deactivate stale target %d: %w", staleID, err)
+		}
+	}
+	return ids, nil
+}
+
+// InsertRun records a completed fuzz run (including revision and Go version) and returns its new run ID.
 func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -346,10 +560,12 @@ func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 	err := s.db.QueryRowContext(ctx,
 		`INSERT INTO runs (
 			target_id, started, duration_sec, execs, execs_per_sec,
-			new_interesting, crashes, coverage_pct, status, worker
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+			new_interesting, corpus_count, crashes, coverage_pct, status, worker,
+			git_sha, dirty, go_version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		r.TargetID, started, r.DurationSec, r.Execs, r.ExecsPerSec,
-		r.NewInteresting, r.Crashes, r.CoveragePct, r.Status, r.Worker,
+		r.NewInteresting, r.CorpusCount, r.Crashes, r.CoveragePct, r.Status, r.Worker,
+		r.GitSHA, r.Dirty, r.GoVersion,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert run for target %d: %w", r.TargetID, err)
@@ -357,7 +573,8 @@ func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 	return id, nil
 }
 
-// RecordCrash inserts a new crash or updates last_seen if the same (target_id, input_hash) already exists.
+// RecordCrash inserts a new crash or updates last_seen if the same (target_id, input_hash)
+// or (target_id, stack_fingerprint) already exists.
 func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -378,17 +595,20 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 
 	var existingID int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM crashes WHERE target_id = ? AND input_hash = ?`,
-		c.TargetID, c.InputHash,
+		`SELECT id FROM crashes
+		 WHERE target_id = ? AND (input_hash = ? OR (? != '' AND stack_fingerprint = ?))
+		 ORDER BY id ASC LIMIT 1`,
+		c.TargetID, c.InputHash, c.StackFingerprint, c.StackFingerprint,
 	).Scan(&existingID)
 	if errors.Is(err, sql.ErrNoRows) {
 		var id int64
 		err = s.db.QueryRowContext(ctx,
 			`INSERT INTO crashes (
-				target_id, first_seen, last_seen, fixed_at, stack,
-				input_hash, minimized_input, issue_url
-			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?) RETURNING id`,
-			c.TargetID, firstSeen, lastSeen, c.Stack, c.InputHash, c.MinimizedInput, c.IssueURL,
+				target_id, first_seen, last_seen, fixed_at, stack, stack_fingerprint,
+				input_hash, minimized_input, issue_url, git_sha, dirty, go_version
+			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+			c.TargetID, firstSeen, lastSeen, c.Stack, c.StackFingerprint,
+			c.InputHash, c.MinimizedInput, c.IssueURL, c.GitSHA, c.Dirty, c.GoVersion,
 		).Scan(&id)
 		if err != nil {
 			return 0, fmt.Errorf("insert crash: %w", err)
@@ -400,8 +620,24 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 	}
 
 	_, err = s.db.ExecContext(ctx,
-		`UPDATE crashes SET last_seen = ?, fixed_at = NULL, stack = CASE WHEN ? != '' THEN ? ELSE stack END WHERE id = ?`,
-		lastSeen, c.Stack, c.Stack, existingID,
+		`UPDATE crashes
+		 SET last_seen = ?,
+		     fixed_at = NULL,
+		     stack = CASE WHEN ? != '' THEN ? ELSE stack END,
+		     stack_fingerprint = CASE WHEN ? != '' THEN ? ELSE stack_fingerprint END,
+		     minimized_input = CASE WHEN ? != '' THEN ? ELSE minimized_input END,
+		     git_sha = CASE WHEN ? != '' THEN ? ELSE git_sha END,
+		     dirty = ?,
+		     go_version = CASE WHEN ? != '' THEN ? ELSE go_version END
+		 WHERE id = ?`,
+		lastSeen,
+		c.Stack, c.Stack,
+		c.StackFingerprint, c.StackFingerprint,
+		c.MinimizedInput, c.MinimizedInput,
+		c.GitSHA, c.GitSHA,
+		c.Dirty,
+		c.GoVersion, c.GoVersion,
+		existingID,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("update crash %d: %w", existingID, err)
@@ -409,7 +645,67 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 	return existingID, nil
 }
 
-// ListProjects returns all projects with their latest aggregated status summary.
+// MarkCrashFixed marks a crash as fixed at fixedAt and optionally sets issueURL.
+func (s *Store) MarkCrashFixed(ctx context.Context, crashID int64, fixedAt time.Time, issueURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if fixedAt.IsZero() {
+		fixedAt = time.Now().UTC()
+	} else {
+		fixedAt = fixedAt.UTC()
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE crashes
+		 SET fixed_at = ?,
+		     issue_url = CASE WHEN ? != '' THEN ? ELSE issue_url END
+		 WHERE id = ?`,
+		fixedAt, issueURL, issueURL, crashID,
+	)
+	if err != nil {
+		return fmt.Errorf("mark crash %d fixed: %w", crashID, err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("crash %d not found", crashID)
+	}
+	return nil
+}
+
+// PruneOldRuns deletes raw runs older than retention while preserving at least the most recent
+// keepPerTarget runs per target so latest status and 10-point trends remain populated.
+func (s *Store) PruneOldRuns(ctx context.Context, retention time.Duration, keepPerTarget int) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if retention <= 0 {
+		retention = 14 * 24 * time.Hour
+	}
+	if keepPerTarget <= 0 {
+		keepPerTarget = 10
+	}
+	cutoff := time.Now().UTC().Add(-retention)
+
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM runs
+		WHERE started < ?
+		  AND id NOT IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (PARTITION BY target_id ORDER BY started DESC, id DESC) AS rn
+				FROM runs
+			) ranked
+			WHERE rn <= ?
+		  )
+	`, cutoff, keepPerTarget)
+	if err != nil {
+		return 0, fmt.Errorf("prune old runs: %w", err)
+	}
+	deleted, _ := res.RowsAffected()
+	return deleted, nil
+}
+
+// ListProjects returns all projects with their latest aggregated status and revision summary.
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -420,6 +716,9 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 			p.name,
 			p.repo,
 			COALESCE(p.branch, ''),
+			COALESCE(p.git_sha, ''),
+			COALESCE(p.dirty, FALSE),
+			COALESCE(p.sync_error, ''),
 			p.last_synced,
 			COUNT(v.target_id) AS target_count,
 			COALESCE(SUM(v.total_runs), 0) AS total_runs,
@@ -431,7 +730,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 			COALESCE(SUM(CASE WHEN v.status = 'ok' THEN 1 ELSE 0 END), 0) AS ok_targets
 		FROM projects p
 		LEFT JOIN latest_target_status v ON v.project_id = p.id
-		GROUP BY p.id, p.name, p.repo, p.branch, p.last_synced
+		GROUP BY p.id, p.name, p.repo, p.branch, p.git_sha, p.dirty, p.sync_error, p.last_synced
 		ORDER BY p.name ASC;
 	`
 
@@ -448,7 +747,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 		var lastRunAt sql.NullTime
 		var errTargets, okTargets int
 		if err := rows.Scan(
-			&p.ID, &p.Name, &p.Repo, &p.Branch, &lastSynced,
+			&p.ID, &p.Name, &p.Repo, &p.Branch, &p.GitSHA, &p.Dirty, &p.SyncError, &lastSynced,
 			&p.TargetCount, &p.TotalRuns, &p.OpenCrashes, &lastRunAt,
 			&p.AvgExecsPerSec, &p.AvgCoveragePct, &errTargets, &okTargets,
 		); err != nil {
@@ -465,7 +764,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 		switch {
 		case p.OpenCrashes > 0:
 			p.LatestStatus = "crash"
-		case errTargets > 0:
+		case p.SyncError != "" || errTargets > 0:
 			p.LatestStatus = "error"
 		case okTargets > 0:
 			p.LatestStatus = "ok"
@@ -483,18 +782,17 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	return result, nil
 }
 
-// ListTargets returns targets with their latest status and recent coverage trend.
-// projectFilter can be empty (all projects), a project name, or a numeric project ID.
+// ListTargets returns active targets with their latest status and recent coverage trend in a single query.
 func (s *Store) ListTargets(ctx context.Context, projectFilter string) ([]Target, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	baseQuery := `
 		SELECT
-			target_id, project_id, project_name, package, target_name,
+			target_id, project_id, project_name, package, target_name, active,
 			last_run_id, last_started, duration_sec, execs, execs_per_sec,
-			new_interesting, crashes, coverage_pct, status, worker,
-			open_crashes, total_runs
+			new_interesting, corpus_count, crashes, coverage_pct, status, worker,
+			git_sha, dirty, go_version, open_crashes, total_runs, coverage_trend_json
 		FROM latest_target_status
 	`
 	var args []any
@@ -515,11 +813,12 @@ func (s *Store) ListTargets(ctx context.Context, projectFilter string) ([]Target
 		var t Target
 		var lastRunID sql.NullInt64
 		var lastStarted sql.NullTime
+		var trendJSON string
 		if err := rows.Scan(
-			&t.ID, &t.ProjectID, &t.ProjectName, &t.Package, &t.Name,
+			&t.ID, &t.ProjectID, &t.ProjectName, &t.Package, &t.Name, &t.Active,
 			&lastRunID, &lastStarted, &t.DurationSec, &t.Execs, &t.ExecsPerSec,
-			&t.NewInteresting, &t.Crashes, &t.CoveragePct, &t.Status, &t.Worker,
-			&t.OpenCrashes, &t.TotalRuns,
+			&t.NewInteresting, &t.CorpusCount, &t.Crashes, &t.CoveragePct, &t.Status, &t.Worker,
+			&t.GitSHA, &t.Dirty, &t.GoVersion, &t.OpenCrashes, &t.TotalRuns, &trendJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan target: %w", err)
 		}
@@ -532,40 +831,14 @@ func (s *Store) ListTargets(ctx context.Context, projectFilter string) ([]Target
 			t.LastStarted = &tm
 		}
 		t.CoverageTrend = []float64{}
+		if trendJSON != "" && trendJSON != "[]" {
+			_ = json.Unmarshal([]byte(trendJSON), &t.CoverageTrend)
+		}
 		targets = append(targets, t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-
-	// Populate recent coverage trend (last 10 runs per target in chronological order)
-	for i := range targets {
-		trendRows, err := s.db.QueryContext(ctx, `
-			SELECT coverage_pct FROM (
-				SELECT coverage_pct, started, id
-				FROM runs
-				WHERE target_id = ?
-				ORDER BY started DESC, id DESC
-				LIMIT 10
-			) sub
-			ORDER BY started ASC, id ASC
-		`, targets[i].ID)
-		if err != nil {
-			continue
-		}
-		var trend []float64
-		for trendRows.Next() {
-			var cov float64
-			if err := trendRows.Scan(&cov); err == nil {
-				trend = append(trend, cov)
-			}
-		}
-		_ = trendRows.Close()
-		if trend != nil {
-			targets[i].CoverageTrend = trend
-		}
-	}
-
 	if targets == nil {
 		targets = []Target{}
 	}
@@ -585,7 +858,8 @@ func (s *Store) ListRuns(ctx context.Context, targetFilter string, limit int) ([
 		SELECT
 			r.id, r.target_id, p.name AS project_name, t.package, t.name AS target_name,
 			r.started, r.duration_sec, r.execs, r.execs_per_sec,
-			r.new_interesting, r.crashes, r.coverage_pct, r.status, r.worker
+			r.new_interesting, COALESCE(r.corpus_count, 0), r.crashes, r.coverage_pct, r.status, r.worker,
+			COALESCE(r.git_sha, ''), COALESCE(r.dirty, FALSE), COALESCE(r.go_version, '')
 		FROM runs r
 		JOIN targets t ON t.id = r.target_id
 		JOIN projects p ON p.id = t.project_id
@@ -609,7 +883,8 @@ func (s *Store) ListRuns(ctx context.Context, targetFilter string, limit int) ([
 		if err := rows.Scan(
 			&r.ID, &r.TargetID, &r.ProjectName, &r.Package, &r.TargetName,
 			&r.Started, &r.DurationSec, &r.Execs, &r.ExecsPerSec,
-			&r.NewInteresting, &r.Crashes, &r.CoveragePct, &r.Status, &r.Worker,
+			&r.NewInteresting, &r.CorpusCount, &r.Crashes, &r.CoveragePct, &r.Status, &r.Worker,
+			&r.GitSHA, &r.Dirty, &r.GoVersion,
 		); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}
@@ -632,8 +907,9 @@ func (s *Store) ListCrashes(ctx context.Context, openOnly bool, targetFilter str
 	query := `
 		SELECT
 			c.id, c.target_id, p.name AS project_name, t.package, t.name AS target_name,
-			c.first_seen, c.last_seen, c.fixed_at, c.stack,
-			c.input_hash, c.minimized_input, COALESCE(c.issue_url, '')
+			c.first_seen, c.last_seen, c.fixed_at, c.stack, COALESCE(c.stack_fingerprint, ''),
+			c.input_hash, c.minimized_input, COALESCE(c.issue_url, ''),
+			COALESCE(c.git_sha, ''), COALESCE(c.dirty, FALSE), COALESCE(c.go_version, '')
 		FROM crashes c
 		JOIN targets t ON t.id = c.target_id
 		JOIN projects p ON p.id = t.project_id
@@ -664,8 +940,9 @@ func (s *Store) ListCrashes(ctx context.Context, openOnly bool, targetFilter str
 		var fixedAt sql.NullTime
 		if err := rows.Scan(
 			&c.ID, &c.TargetID, &c.ProjectName, &c.Package, &c.TargetName,
-			&c.FirstSeen, &c.LastSeen, &fixedAt, &c.Stack,
+			&c.FirstSeen, &c.LastSeen, &fixedAt, &c.Stack, &c.StackFingerprint,
 			&c.InputHash, &c.MinimizedInput, &c.IssueURL,
+			&c.GitSHA, &c.Dirty, &c.GoVersion,
 		); err != nil {
 			return nil, fmt.Errorf("scan crash: %w", err)
 		}
@@ -684,7 +961,7 @@ func (s *Store) ListCrashes(ctx context.Context, openOnly bool, targetFilter str
 	return crashes, nil
 }
 
-// GetCoverageHistory returns chronological coverage and throughput points for a target.
+// GetCoverageHistory returns chronological coverage and corpus points for a target.
 func (s *Store) GetCoverageHistory(ctx context.Context, targetFilter string, limit int) ([]CoveragePoint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -694,7 +971,7 @@ func (s *Store) GetCoverageHistory(ctx context.Context, targetFilter string, lim
 	}
 
 	query := `
-		SELECT run_id, target_id, started, coverage_pct, execs_per_sec, new_interesting
+		SELECT run_id, target_id, started, coverage_pct, execs_per_sec, new_interesting, corpus_count, git_sha
 		FROM (
 			SELECT
 				r.id AS run_id,
@@ -702,7 +979,9 @@ func (s *Store) GetCoverageHistory(ctx context.Context, targetFilter string, lim
 				r.started,
 				r.coverage_pct,
 				r.execs_per_sec,
-				r.new_interesting
+				r.new_interesting,
+				COALESCE(r.corpus_count, 0) AS corpus_count,
+				COALESCE(r.git_sha, '') AS git_sha
 			FROM runs r
 			JOIN targets t ON t.id = r.target_id
 			JOIN projects p ON p.id = t.project_id
@@ -722,7 +1001,7 @@ func (s *Store) GetCoverageHistory(ctx context.Context, targetFilter string, lim
 	var points []CoveragePoint
 	for rows.Next() {
 		var pt CoveragePoint
-		if err := rows.Scan(&pt.RunID, &pt.TargetID, &pt.Started, &pt.CoveragePct, &pt.ExecsPerSec, &pt.NewInteresting); err != nil {
+		if err := rows.Scan(&pt.RunID, &pt.TargetID, &pt.Started, &pt.CoveragePct, &pt.ExecsPerSec, &pt.NewInteresting, &pt.CorpusCount, &pt.GitSHA); err != nil {
 			return nil, fmt.Errorf("scan coverage point: %w", err)
 		}
 		points = append(points, pt)
@@ -736,7 +1015,7 @@ func (s *Store) GetCoverageHistory(ctx context.Context, targetFilter string, lim
 	return points, nil
 }
 
-// GetFleetStats returns summary counts for projects, targets, open crashes, and runs in the last 24h.
+// GetFleetStats returns summary counts for projects, active targets, open crashes, and runs in the last 24h.
 func (s *Store) GetFleetStats(ctx context.Context) (FleetStats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -747,7 +1026,7 @@ func (s *Store) GetFleetStats(ctx context.Context) (FleetStats, error) {
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&stats.TotalProjects); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM targets`).Scan(&stats.TotalTargets); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM targets WHERE COALESCE(active, TRUE) = TRUE`).Scan(&stats.TotalTargets); err != nil {
 		return stats, err
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM crashes WHERE fixed_at IS NULL`).Scan(&stats.OpenCrashes); err != nil {
@@ -759,5 +1038,6 @@ func (s *Store) GetFleetStats(ctx context.Context) (FleetStats, error) {
 	).Scan(&stats.RunsLast24h, &stats.ExecsLast24h, &stats.AvgExecsSec); err != nil {
 		return stats, err
 	}
+	stats.SchemaVersion, _ = s.schemaVersionLocked(ctx)
 	return stats, nil
 }
