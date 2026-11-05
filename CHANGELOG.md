@@ -1,5 +1,10 @@
 # `ntfuzz` CHANGELOG
 
+## Unreleased — 2026-11-05
+
+- Preserve live WebSocket resize notifications through the public viewer's
+  idle-timeout wrapper, with a real-PTY resize regression test.
+
 ## Unreleased — 2026-11-04
 
 - Add periodic immutable DuckDB snapshot publication through the live writer,

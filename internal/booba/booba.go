@@ -53,7 +53,7 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 		refresh = 2 * time.Second
 	}
 
-	boobaServer := serve.NewServer(cfg)
+	boobaServer := serve.NewServer(cfg, serve.WithSessionMiddleware(preserveResizeEvents))
 	boobaHandler, err := boobaServer.HTTPHandlerFor(func(sess serve.Session) (tea.Model, []tea.ProgramOption) {
 		client := api.NewClient(apiBaseURL)
 		if opts.ReadOnly {

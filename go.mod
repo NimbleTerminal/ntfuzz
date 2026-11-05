@@ -8,6 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/NimbleMarkets/go-booba v0.11.0
 	github.com/NimbleMarkets/ntcharts/v2 v2.9.0
+	github.com/coder/websocket v1.8.15
 	github.com/duckdb/duckdb-go/v2 v2.20000.0
 	github.com/spf13/cobra v1.10.2
 	go.yaml.in/yaml/v3 v3.0.5
@@ -33,7 +34,6 @@ require (
 	github.com/charmbracelet/x/xpty v0.1.4 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/duckdb/duckdb-go-bindings v0.20000.0 // indirect
 	github.com/dunglas/httpsfv v1.1.2 // indirect
