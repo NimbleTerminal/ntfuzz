@@ -435,3 +435,33 @@ func TestLocalRunnerEndToEnd(t *testing.T) {
 		t.Fatalf("expected measured positive coverage percentage, got %f (measured=%t)", res.CoveragePct, res.CoverageMeasured)
 	}
 }
+
+func TestDiscoverSelfTargetsSkipsExamples(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	targets, err := DiscoverTargets(ctx, repoRoot)
+	if err != nil {
+		t.Fatalf("DiscoverTargets(repoRoot): %v", err)
+	}
+	if len(targets) == 0 {
+		t.Fatalf("expected ntfuzz self-fuzzing targets to be discovered in %s", repoRoot)
+	}
+	for _, tgt := range targets {
+		if !strings.HasPrefix(tgt.PackageImport, "nimbleterminal.dev/ntfuzz/") {
+			t.Fatalf("expected all discovered self-fuzz targets under nimbleterminal.dev/ntfuzz/*, got %+v", tgt)
+		}
+	}
+
+	// Pointing directly at an example module directory must still discover its targets.
+	exampleTargets, err := DiscoverTargets(ctx, filepath.Join(repoRoot, "examples", "demo-parser"))
+	if err != nil {
+		t.Fatalf("DiscoverTargets(demo-parser): %v", err)
+	}
+	if len(exampleTargets) != 2 {
+		t.Fatalf("expected 2 targets in examples/demo-parser when targeted directly, got %+v", exampleTargets)
+	}
+}

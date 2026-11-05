@@ -1,13 +1,13 @@
 package orchestrator
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // JobSpec describes a single fuzzing job to be executed by a worker.
@@ -214,7 +215,7 @@ func MigrateLegacyCorpus(absCorpusRoot, pkgSeg, targetName, targetCacheRoot stri
 
 // ParseFuzzOutput extracts execution metrics, coverage, status, stack fingerprints, and crash artifacts.
 func ParseFuzzOutput(output string, started time.Time, durationSec float64, runErr error) JobResult {
-	if durationSec <= 0 {
+	if math.IsNaN(durationSec) || math.IsInf(durationSec, 0) || durationSec <= 0 {
 		durationSec = 0.001
 	}
 	res := JobResult{
@@ -225,14 +226,13 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 	}
 
 	var lastRate float64
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		line := scanner.Text()
+	for line := range strings.SplitSeq(output, "\n") {
+		line = strings.TrimSuffix(line, "\r")
 		if m := reFuzzProgress.FindStringSubmatch(line); m != nil {
 			if execs, err := strconv.ParseInt(m[1], 10, 64); err == nil && execs >= res.Execs {
 				res.Execs = execs
 			}
-			if rate, err := strconv.ParseFloat(m[2], 64); err == nil && rate > 0 {
+			if rate, err := strconv.ParseFloat(m[2], 64); err == nil && !math.IsNaN(rate) && !math.IsInf(rate, 0) && rate > 0 {
 				lastRate = rate
 			}
 			if len(m) > 3 && m[3] != "" {
@@ -247,7 +247,7 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 			}
 		}
 		if m := reCoverage.FindStringSubmatch(line); m != nil {
-			if cov, err := strconv.ParseFloat(m[1], 64); err == nil {
+			if cov, err := strconv.ParseFloat(m[1], 64); err == nil && !math.IsNaN(cov) && !math.IsInf(cov, 0) {
 				res.CoveragePct = cov
 				res.CoverageMeasured = true
 			}
@@ -266,7 +266,9 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 	}
 
 	if res.Execs > 0 {
-		res.ExecsPerSec = float64(res.Execs) / durationSec
+		if rate := float64(res.Execs) / durationSec; !math.IsNaN(rate) && !math.IsInf(rate, 0) {
+			res.ExecsPerSec = rate
+		}
 	}
 	if lastRate > 0 && res.ExecsPerSec == 0 {
 		res.ExecsPerSec = lastRate
@@ -428,7 +430,7 @@ func copyModuleTree(srcRoot, dstRoot string) error {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" {
+			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "bin" {
 				return filepath.SkipDir
 			}
 			return os.MkdirAll(filepath.Join(dstRoot, rel), 0o755)
@@ -508,10 +510,13 @@ func extractCrashStack(output string) string {
 		trimmed := strings.TrimSpace(output)
 		if len(trimmed) > 500 {
 			trimmed = trimmed[len(trimmed)-500:]
+			for len(trimmed) > 0 && !utf8.RuneStart(trimmed[0]) {
+				trimmed = trimmed[1:]
+			}
 		}
-		return trimmed
+		return strings.ToValidUTF8(trimmed, "")
 	}
-	return strings.TrimSpace(strings.Join(keep, "\n"))
+	return strings.ToValidUTF8(strings.TrimSpace(strings.Join(keep, "\n")), "")
 }
 
 func sanitizePathSegment(s string) string {

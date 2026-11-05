@@ -166,7 +166,7 @@ func ReadSnapshot(dir string) (Snapshot, error) {
 	if err = json.Unmarshal(data, &meta); err != nil {
 		return meta, err
 	}
-	if filepath.Base(meta.File) != meta.File || !strings.HasPrefix(meta.File, "snapshot-") || !strings.HasSuffix(meta.File, ".duckdb") || meta.PublishedAt.IsZero() || meta.SchemaVersion != CurrentSchemaVersion {
+	if filepath.Base(meta.File) != meta.File || strings.ContainsAny(meta.File, `/\`) || !strings.HasPrefix(meta.File, "snapshot-") || !strings.HasSuffix(meta.File, ".duckdb") || meta.PublishedAt.IsZero() || meta.SchemaVersion != CurrentSchemaVersion {
 		return meta, errors.New("invalid snapshot manifest")
 	}
 	info, err := os.Lstat(filepath.Join(dir, meta.File))

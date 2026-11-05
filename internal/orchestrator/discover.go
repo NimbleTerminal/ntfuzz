@@ -210,7 +210,7 @@ func DiscoverTargets(ctx context.Context, repoDir string) ([]DiscoveredTarget, e
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if path != repoDir && (strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata" || name == "node_modules") {
+			if path != repoDir && (strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata" || name == "node_modules" || name == "examples") {
 				return filepath.SkipDir
 			}
 			return nil

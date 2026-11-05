@@ -2,6 +2,25 @@
 
 ## Unreleased — 2026-11-05
 
+- Add native Go fuzz targets across `ntfuzz` packages so `ntfuzz` can fuzz itself:
+  - `internal/orchestrator`: `FuzzParseConfig`, `FuzzParseFuzzOutput`, and
+    `FuzzFingerprintStack` (hardening project name validation against path
+    traversal/control characters, `ParseFuzzOutput` against >64KB output lines
+    and `NaN`/`Inf` durations, `extractCrashStack` UTF-8 rune boundaries, and
+    skipping nested `examples/` directories when discovering targets from a
+    repository root).
+  - `internal/booba`: `FuzzValidateAndRenderBranding` (verifying HTML escaping,
+    URL scheme/host/credential validation, `#RRGGBB` normalization, and
+    validation idempotence).
+  - `internal/metrics`: `FuzzClassifyLabels` and `FuzzResolveListenAddr`
+    (verifying bounded Prometheus label cardinality and listener address parsing).
+  - `internal/store`: `FuzzReadSnapshotManifest` (verifying manifest size/schema
+    checks and path-traversal rejection across `/` and `\` separators).
+  - `internal/api`: `FuzzParseOpenParamAndFixRequest` (verifying query parameter
+    parsing, read-only snapshot route isolation, and JSON body validation).
+  - `internal/tui`: `FuzzFormatAndRenderHelpers` (hardening coverage trend bar
+    rendering and execution-rate formatting against `NaN`/`Inf` and UTF-8
+    truncation).
 - Change the Go module path from `github.com/NimbleTerminal/ntfuzz` to
   `nimbleterminal.dev/ntfuzz` for consistency with `nimbleterminal.dev/ntduckbox`.
 - Add optional browser dashboard branding (`--brand-name`, `--brand-url`,

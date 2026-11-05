@@ -128,7 +128,17 @@ func RenderStatusBadge(status string, isRunning bool) string {
 func RenderCoverageTrend(points []float64, width int) string {
 	if width <= 0 {
 		width = 8
+	} else if width > 256 {
+		width = 256
 	}
+	clean := make([]float64, 0, len(points))
+	for _, v := range points {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
+		clean = append(clean, v)
+	}
+	points = clean
 	if len(points) == 0 {
 		return statusPendingStyle.Render(strings.Repeat("·", width))
 	}
@@ -178,7 +188,7 @@ func RenderCoverageTrend(points []float64, width int) string {
 // FormatExecRate formats an execs/sec float into a compact human-readable string.
 func FormatExecRate(rate float64) string {
 	switch {
-	case rate <= 0:
+	case math.IsNaN(rate) || math.IsInf(rate, 0) || rate <= 0:
 		return "0/s"
 	case rate >= 1_000_000:
 		return fmt.Sprintf("%.1fM/s", rate/1_000_000)

@@ -881,8 +881,8 @@ func formatRevision(sha string, dirty bool) string {
 	if sha == "" {
 		return "n/a"
 	}
-	if len(sha) > 8 {
-		sha = sha[:8]
+	if runes := []rune(sha); len(runes) > 8 {
+		sha = string(runes[:8])
 	}
 	if dirty {
 		return sha + "*"
