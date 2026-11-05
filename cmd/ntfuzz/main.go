@@ -14,12 +14,12 @@ import (
 	booba "github.com/NimbleMarkets/go-booba"
 	"github.com/spf13/cobra"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/api"
-	boobabridge "github.com/NimbleTerminal/ntfuzz/internal/booba"
-	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
-	"github.com/NimbleTerminal/ntfuzz/internal/orchestrator"
-	"github.com/NimbleTerminal/ntfuzz/internal/store"
-	"github.com/NimbleTerminal/ntfuzz/internal/tui"
+	"nimbleterminal.dev/ntfuzz/internal/api"
+	boobabridge "nimbleterminal.dev/ntfuzz/internal/booba"
+	"nimbleterminal.dev/ntfuzz/internal/metrics"
+	"nimbleterminal.dev/ntfuzz/internal/orchestrator"
+	"nimbleterminal.dev/ntfuzz/internal/store"
+	"nimbleterminal.dev/ntfuzz/internal/tui"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module github.com/NimbleTerminal/ntfuzz
+module nimbleterminal.dev/ntfuzz
 
 go 1.27
 

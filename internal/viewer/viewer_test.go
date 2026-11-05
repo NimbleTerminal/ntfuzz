@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/api"
-	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
-	"github.com/NimbleTerminal/ntfuzz/internal/store"
+	"nimbleterminal.dev/ntfuzz/internal/api"
+	"nimbleterminal.dev/ntfuzz/internal/metrics"
+	"nimbleterminal.dev/ntfuzz/internal/store"
 )
 
 func TestSnapshotIsolationAndRefresh(t *testing.T) {

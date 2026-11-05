@@ -9,7 +9,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/NimbleTerminal/ntfuzz/configs"
+	"nimbleterminal.dev/ntfuzz/configs"
 )
 
 // Config defines the YAML configuration for the ntfuzz orchestrator.

@@ -3,8 +3,8 @@ package api
 import (
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/orchestrator"
-	"github.com/NimbleTerminal/ntfuzz/internal/store"
+	"nimbleterminal.dev/ntfuzz/internal/orchestrator"
+	"nimbleterminal.dev/ntfuzz/internal/store"
 )
 
 // Project is the JSON wire representation of a fuzzing project.

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
-	"github.com/NimbleTerminal/ntfuzz/internal/orchestrator"
-	"github.com/NimbleTerminal/ntfuzz/internal/store"
+	"nimbleterminal.dev/ntfuzz/internal/metrics"
+	"nimbleterminal.dev/ntfuzz/internal/orchestrator"
+	"nimbleterminal.dev/ntfuzz/internal/store"
 )
 
 // WorkerStatusProvider reports current orchestrator worker activity.

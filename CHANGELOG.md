@@ -2,6 +2,8 @@
 
 ## Unreleased — 2026-11-05
 
+- Change the Go module path from `github.com/NimbleTerminal/ntfuzz` to
+  `nimbleterminal.dev/ntfuzz` for consistency with `nimbleterminal.dev/ntduckbox`.
 - Add optional browser dashboard branding (`--brand-name`, `--brand-url`,
   `--brand-accent` and `NTFUZZ_BRAND_NAME`, `NTFUZZ_BRAND_URL`,
   `NTFUZZ_BRAND_ACCENT`) for both `ntfuzz serve` and `ntfuzz view`:

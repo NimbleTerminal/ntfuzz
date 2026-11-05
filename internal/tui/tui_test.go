@@ -10,7 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/NimbleMarkets/go-booba/actions/bubblehelp"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/api"
+	"nimbleterminal.dev/ntfuzz/internal/api"
 )
 
 func TestModelPureTransitionsAndViews(t *testing.T) {

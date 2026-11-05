@@ -11,7 +11,7 @@ import (
 
 	"github.com/NimbleMarkets/go-booba/serve"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
+	"nimbleterminal.dev/ntfuzz/internal/metrics"
 )
 
 // go-booba v0.11's built-in idle wrapper embeds only serve.Session, hiding

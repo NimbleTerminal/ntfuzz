@@ -9,10 +9,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/booba"
-	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
-	"github.com/NimbleTerminal/ntfuzz/internal/viewer"
 	"github.com/spf13/cobra"
+	"nimbleterminal.dev/ntfuzz/internal/booba"
+	"nimbleterminal.dev/ntfuzz/internal/metrics"
+	"nimbleterminal.dev/ntfuzz/internal/viewer"
 )
 
 func newViewCmd() *cobra.Command {

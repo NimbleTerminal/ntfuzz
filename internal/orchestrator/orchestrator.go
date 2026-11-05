@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/store"
+	"nimbleterminal.dev/ntfuzz/internal/store"
 )
 
 // ActiveJob describes an in-flight fuzzing worker job managed by the orchestrator.

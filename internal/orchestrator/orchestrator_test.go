@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/store"
+	"nimbleterminal.dev/ntfuzz/internal/store"
 )
 
 func TestParseConfigValidation(t *testing.T) {

@@ -17,7 +17,7 @@ import (
 	"github.com/NimbleMarkets/ntcharts/v2/sparkline"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/NimbleTerminal/ntfuzz/internal/api"
+	"nimbleterminal.dev/ntfuzz/internal/api"
 )
 
 type tickMsg time.Time
