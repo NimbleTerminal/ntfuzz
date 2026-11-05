@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"github.com/NimbleMarkets/go-booba/sip"
 	"github.com/coder/websocket"
+	dto "github.com/prometheus/client_model/go"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/NimbleTerminal/ntfuzz/internal/api"
+	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
 	"github.com/NimbleTerminal/ntfuzz/internal/store"
 )
 
@@ -79,7 +82,13 @@ func TestReadOnlyTerminalResizesExistingSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	handler, err := NewHandler(api.NewSnapshotServer(st, store.Snapshot{PublishedAt: time.Now()}), "", BridgeOptions{ListenAddr: "127.0.0.1:8081", ReadOnly: true, RefreshInterval: time.Hour})
+	m := metrics.New(metrics.ModeView)
+	handler, err := NewHandler(api.NewSnapshotServer(st, store.Snapshot{PublishedAt: time.Now()}), "", BridgeOptions{
+		ListenAddr:      "127.0.0.1:8081",
+		ReadOnly:        true,
+		RefreshInterval: time.Hour,
+		Metrics:         m,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,4 +144,445 @@ func TestReadOnlyTerminalResizesExistingSession(t *testing.T) {
 		}
 		deadline.Stop()
 	}
+}
+
+func TestSessionLifecycleBytesAndInternalAPIExemption(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "lifecycle.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	m := metrics.New(metrics.ModeServe)
+	apiSrv := api.NewServer(st, nil)
+	handler, err := NewHandler(apiSrv, "", BridgeOptions{
+		ListenAddr:      "127.0.0.1:8080",
+		RefreshInterval: 40 * time.Millisecond,
+		Metrics:         m,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket.Dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	resizePayload, _ := json.Marshal(sip.ResizeMessage{Cols: 100, Rows: 30})
+	if err := conn.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgResize, resizePayload)); err != nil {
+		t.Fatalf("write initial resize: %v", err)
+	}
+
+	// Wait until session is opened and initial PTY output is sent.
+	waitForCondition(t, 3*time.Second, func() bool {
+		return metricValue(t, m, "ntfuzz_terminal_sessions_active", map[string]string{"mode": "serve"}) == 1 &&
+			metricValue(t, m, "ntfuzz_terminal_sessions_opened_total", map[string]string{"mode": "serve"}) == 1 &&
+			metricValue(t, m, "ntfuzz_terminal_bytes_sent_total", map[string]string{"mode": "serve"}) > 0
+	})
+
+	// Send terminal input ("r" keystroke to trigger TUI refresh) and verify input bytes are counted.
+	if err := conn.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgInput, []byte("r"))); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		return metricValue(t, m, "ntfuzz_terminal_bytes_received_total", map[string]string{"mode": "serve"}) >= 1
+	})
+
+	// Allow in-process TUI refreshes to run; verify internal API calls were NOT counted as external HTTP requests.
+	time.Sleep(100 * time.Millisecond)
+	for _, route := range []string{"/api/status", "/api/projects", "/api/targets", "/api/crashes"} {
+		if got := metricValue(t, m, "ntfuzz_http_requests_total", map[string]string{
+			"mode": "serve", "route": route, "method": "GET", "status_class": "2xx",
+		}); got != 0 {
+			t.Fatalf("internal TUI API poll on %s was counted as external HTTP request: %v", route, got)
+		}
+	}
+
+	// WebSocket upgrade itself was counted once under route="/ws", status_class="1xx".
+	if got := metricValue(t, m, "ntfuzz_http_requests_total", map[string]string{
+		"mode": "serve", "route": "/ws", "method": "GET", "status_class": "1xx",
+	}); got != 1 {
+		t.Fatalf("expected 1 /ws 1xx upgrade request, got %v", got)
+	}
+
+	// Disconnect client and verify active returns to 0 and disconnect reason + duration are recorded once.
+	_ = conn.Close(websocket.StatusNormalClosure, "bye")
+	waitForCondition(t, 3*time.Second, func() bool {
+		return metricValue(t, m, "ntfuzz_terminal_sessions_active", map[string]string{"mode": "serve"}) == 0 &&
+			metricValue(t, m, "ntfuzz_terminal_sessions_closed_total", map[string]string{"mode": "serve", "reason": "client_disconnect"}) == 1 &&
+			metricHistogramCount(t, m, "ntfuzz_terminal_session_duration_seconds", map[string]string{"mode": "serve", "reason": "client_disconnect"}) == 1
+	})
+}
+
+func TestIdleTimeoutAndServerShutdownDisconnectReasons(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "idle.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// 1. Verify idle_timeout disconnect reason.
+	mIdle := metrics.New(metrics.ModeView)
+	snapSrv := api.NewSnapshotServer(st, store.Snapshot{PublishedAt: time.Now()})
+	handlerIdle, err := NewHandler(snapSrv, "", BridgeOptions{
+		ListenAddr:      "127.0.0.1:8081",
+		ReadOnly:        true,
+		IdleTimeout:     80 * time.Millisecond,
+		RefreshInterval: time.Hour,
+		Metrics:         mIdle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvIdle := httptest.NewServer(handlerIdle)
+	defer srvIdle.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsIdleURL := "ws" + strings.TrimPrefix(srvIdle.URL, "http") + "/ws"
+	connIdle, _, err := websocket.Dial(ctx, wsIdleURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connIdle.CloseNow()
+
+	resizePayload, _ := json.Marshal(sip.ResizeMessage{Cols: 80, Rows: 24})
+	if err := connIdle.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgResize, resizePayload)); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		return metricValue(t, mIdle, "ntfuzz_terminal_sessions_active", map[string]string{"mode": "view"}) == 0 &&
+			metricValue(t, mIdle, "ntfuzz_terminal_sessions_closed_total", map[string]string{"mode": "view", "reason": "idle_timeout"}) == 1 &&
+			metricHistogramCount(t, mIdle, "ntfuzz_terminal_session_duration_seconds", map[string]string{"mode": "view", "reason": "idle_timeout"}) == 1
+	})
+
+	// 2. Verify server_shutdown disconnect reason.
+	mShutdown := metrics.New(metrics.ModeView)
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	defer srvCancel()
+
+	handlerShutdown, err := NewHandler(snapSrv, "", BridgeOptions{
+		ListenAddr:      "127.0.0.1:8081",
+		ReadOnly:        true,
+		RefreshInterval: time.Hour,
+		ServerContext:   srvCtx,
+		Metrics:         mShutdown,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvShutdown := httptest.NewServer(handlerShutdown)
+	defer srvShutdown.Close()
+
+	wsShutdownURL := "ws" + strings.TrimPrefix(srvShutdown.URL, "http") + "/ws"
+	connShutdown, _, err := websocket.Dial(ctx, wsShutdownURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connShutdown.CloseNow()
+
+	if err := connShutdown.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgResize, resizePayload)); err != nil {
+		t.Fatal(err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		return metricValue(t, mShutdown, "ntfuzz_terminal_sessions_active", map[string]string{"mode": "view"}) == 1
+	})
+
+	srvCancel()
+	_ = connShutdown.CloseNow()
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		return metricValue(t, mShutdown, "ntfuzz_terminal_sessions_active", map[string]string{"mode": "view"}) == 0 &&
+			metricValue(t, mShutdown, "ntfuzz_terminal_sessions_closed_total", map[string]string{"mode": "view", "reason": "server_shutdown"}) == 1
+	})
+}
+
+func TestRejectedTerminalConnections(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "reject.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	m := metrics.New(metrics.ModeView)
+	snapSrv := api.NewSnapshotServer(st, store.Snapshot{PublishedAt: time.Now()})
+	handler, err := NewHandler(snapSrv, "", BridgeOptions{
+		ListenAddr:      "127.0.0.1:8081",
+		ReadOnly:        true,
+		MaxConnections:  1,
+		RefreshInterval: time.Hour,
+		Metrics:         m,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn1, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn1.CloseNow()
+
+	resizePayload, _ := json.Marshal(sip.ResizeMessage{Cols: 80, Rows: 24})
+	if err := conn1.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgResize, resizePayload)); err != nil {
+		t.Fatal(err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		return metricValue(t, m, "ntfuzz_terminal_sessions_active", map[string]string{"mode": "view"}) == 1
+	})
+
+	// 1. Second concurrent connection exceeds MaxConnections=1 -> rejected with connection_limit (HTTP 503).
+	_, resp2, err := websocket.Dial(ctx, wsURL, nil)
+	if err == nil {
+		t.Fatal("expected second connection to be rejected by MaxConnections=1")
+	}
+	if resp2 != nil && resp2.Body != nil {
+		_ = resp2.Body.Close()
+	}
+	if resp2 == nil || resp2.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable, got %+v", resp2)
+	}
+	if got := metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "connection_limit"}); got != 1 {
+		t.Fatalf("expected connection_limit rejected=1, got %v", got)
+	}
+	if got := metricValue(t, m, "ntfuzz_terminal_sessions_opened_total", map[string]string{"mode": "view"}); got != 1 {
+		t.Fatalf("expected opened_total to remain 1, got %v", got)
+	}
+
+	// Close first session to free the connection slot.
+	_ = conn1.Close(websocket.StatusNormalClosure, "done")
+	waitForCondition(t, 3*time.Second, func() bool {
+		return metricValue(t, m, "ntfuzz_terminal_sessions_active", map[string]string{"mode": "view"}) == 0
+	})
+
+	// 2. Cross-origin WebSocket request with untrusted Origin -> rejected with origin (HTTP 403).
+	_, respOrigin, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Origin": []string{"https://evil.example.invalid"}},
+	})
+	if err == nil {
+		t.Fatal("expected cross-origin websocket to be rejected")
+	}
+	if respOrigin != nil && respOrigin.Body != nil {
+		_ = respOrigin.Body.Close()
+	}
+	if got := metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "origin"}); got != 1 {
+		t.Fatalf("expected origin rejected=1, got %v", got)
+	}
+
+	// 3. Plain HTTP GET /ws without WebSocket upgrade headers -> rejected with handshake.
+	respPlain, err := http.Get(server.URL + "/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = respPlain.Body.Close()
+	if got := metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "handshake"}); got != 1 {
+		t.Fatalf("expected handshake rejected=1 after plain GET /ws, got %v", got)
+	}
+
+	// 4. WebSocket connection that sends an oversized initial resize -> rejected with handshake before opening a session.
+	connBad, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badResize, _ := json.Marshal(sip.ResizeMessage{Cols: 99999, Rows: 99999})
+	_ = connBad.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgResize, badResize))
+	_ = connBad.CloseNow()
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "handshake"}) == 2
+	})
+	if got := metricValue(t, m, "ntfuzz_terminal_sessions_opened_total", map[string]string{"mode": "view"}); got != 1 {
+		t.Fatalf("expected opened_total to remain 1 after rejected handshakes, got %v", got)
+	}
+}
+
+func TestRequestAccountingAndMetricsListenerIsolation(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "isolation.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	dashLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := metrics.New(metrics.ModeServe)
+	apiSrv := api.NewServer(st, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- ListenAndServe(ctx, apiSrv, BridgeOptions{
+			ListenAddr:      dashLn.Addr().String(),
+			Listener:        dashLn,
+			RefreshInterval: time.Hour,
+			Metrics:         m,
+			MetricsListener: metricsLn,
+		})
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	dashURL := "http://" + dashLn.Addr().String()
+	metricsURL := "http://" + metricsLn.Addr().String()
+
+	// Make external visitor requests with query strings, target names, repo names, and crash IDs.
+	for _, reqSpec := range []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{http.MethodGet, "/", http.StatusOK},
+		{http.MethodGet, "/static/booba/booba.js", http.StatusOK},
+		{http.MethodGet, "/api/targets?project=confidential-repo-name", http.StatusOK},
+		{http.MethodGet, "/api/crashes?open=notabool&target=FuzzSecretTarget", http.StatusBadRequest},
+		{http.MethodPost, "/api/crashes/12345/fix", http.StatusNotFound},
+		{http.MethodGet, "/metrics", http.StatusNotFound}, // /metrics MUST NOT be exposed on dashboard listener
+	} {
+		req, err := http.NewRequest(reqSpec.method, dashURL+reqSpec.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", reqSpec.method, reqSpec.path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != reqSpec.want {
+			t.Fatalf("%s %s: status=%d, want %d", reqSpec.method, reqSpec.path, resp.StatusCode, reqSpec.want)
+		}
+	}
+
+	// Scrape the isolated metrics listener.
+	resp, err := http.Get(metricsURL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET %s/metrics: %v", metricsURL, err)
+	}
+	rawMetrics, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("metrics listener returned %d", resp.StatusCode)
+	}
+	text := string(rawMetrics)
+
+	// Verify bounded route templates and status classes are recorded.
+	for _, wantLine := range []string{
+		`ntfuzz_http_requests_total{method="GET",mode="serve",route="/",status_class="2xx"} 1`,
+		`ntfuzz_http_requests_total{method="GET",mode="serve",route="/static/*",status_class="2xx"} 1`,
+		`ntfuzz_http_requests_total{method="GET",mode="serve",route="/api/targets",status_class="2xx"} 1`,
+		`ntfuzz_http_requests_total{method="GET",mode="serve",route="/api/crashes",status_class="4xx"} 1`,
+		`ntfuzz_http_requests_total{method="POST",mode="serve",route="/api/crashes/{id}/fix",status_class="4xx"} 1`,
+		`ntfuzz_http_requests_total{method="GET",mode="serve",route="other",status_class="4xx"} 1`,
+	} {
+		if !strings.Contains(text, wantLine) {
+			t.Errorf("missing expected metric line %q in:\n%s", wantLine, text)
+		}
+	}
+
+	// Verify sensitive / high-cardinality tokens never appear in metrics exposition.
+	for _, forbidden := range []string{
+		"confidential-repo-name",
+		"FuzzSecretTarget",
+		"12345",
+		"notabool",
+		"booba.js",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("metrics output leaked high-cardinality or sensitive value %q:\n%s", forbidden, text)
+		}
+	}
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
+}
+
+func metricValue(t *testing.T, m *metrics.Metrics, name string, labels map[string]string) float64 {
+	t.Helper()
+	mfs, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			if labelsMatch(metric, labels) {
+				if c := metric.GetCounter(); c != nil {
+					return c.GetValue()
+				}
+				if g := metric.GetGauge(); g != nil {
+					return g.GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func metricHistogramCount(t *testing.T, m *metrics.Metrics, name string, labels map[string]string) uint64 {
+	t.Helper()
+	mfs, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			if labelsMatch(metric, labels) && metric.GetHistogram() != nil {
+				return metric.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
+func labelsMatch(m *dto.Metric, want map[string]string) bool {
+	if len(m.GetLabel()) != len(want) {
+		return false
+	}
+	for _, lp := range m.GetLabel() {
+		if v, ok := want[lp.GetName()]; !ok || v != lp.GetValue() {
+			return false
+		}
+	}
+	return true
 }

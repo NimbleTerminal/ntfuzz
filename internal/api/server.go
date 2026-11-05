@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
 	"github.com/NimbleTerminal/ntfuzz/internal/orchestrator"
 	"github.com/NimbleTerminal/ntfuzz/internal/store"
 )
@@ -27,6 +28,21 @@ type Server struct {
 	workers  WorkerStatusProvider
 	mux      *http.ServeMux
 	snapshot *store.Snapshot
+}
+
+// SetMetrics attaches Prometheus metrics to the store and live worker status provider.
+func (s *Server) SetMetrics(m *metrics.Metrics) {
+	if s == nil || m == nil {
+		return
+	}
+	if s.store != nil && s.snapshot == nil {
+		s.store.SetMetrics(m)
+	}
+	if s.workers != nil && s.snapshot == nil {
+		m.RegisterWorkerStatus(s.workers.WorkerCount, func() int {
+			return len(s.workers.ActiveJobs())
+		})
+	}
 }
 
 // NewServer creates a new API server backed by the given DuckDB store and optional worker status provider.

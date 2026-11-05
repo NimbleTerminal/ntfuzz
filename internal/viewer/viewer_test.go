@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/NimbleTerminal/ntfuzz/internal/api"
+	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
 	"github.com/NimbleTerminal/ntfuzz/internal/store"
 )
 
@@ -114,4 +116,103 @@ func TestSnapshotIsolationAndRefresh(t *testing.T) {
 	if response.Code != 200 || !status.ReadOnly || status.SnapshotAt == nil || !status.SnapshotAt.Equal(second.PublishedAt) || status.ActiveWorkers != 0 {
 		t.Fatalf("bad snapshot status: %+v", status)
 	}
+}
+
+func TestSnapshotPublicationAndViewerRefreshMetrics(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	serveMetrics := metrics.New(metrics.ModeServe)
+	viewMetrics := metrics.New(metrics.ModeView)
+
+	writer, err := store.Open(filepath.Join(dir, "live.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	writer.SetMetrics(serveMetrics)
+
+	snapshots := filepath.Join(dir, "snapshots")
+	first, err := writer.PublishSnapshot(ctx, snapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Open viewer with metrics and verify initial refresh success + snapshot age.
+	v, err := OpenWithMetrics(snapshots, viewMetrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	// Advance fake viewer clock 12.5 seconds past the published snapshot timestamp.
+	viewMetrics.SetClock(func() time.Time {
+		return first.PublishedAt.Add(12500 * time.Millisecond)
+	})
+
+	// Attempting to publish from the read-only snapshot store fails and records an error publication metric if attached.
+	v.db.SetMetrics(serveMetrics)
+	if _, err := v.db.PublishSnapshot(ctx, snapshots); err == nil {
+		t.Fatal("expected read-only store PublishSnapshot to fail")
+	}
+
+	// Corrupt manifest so viewer Refresh fails, then verify error count increments and snapshot age still reflects first.PublishedAt.
+	if err := os.WriteFile(filepath.Join(snapshots, "current.json"), []byte(`{"file":"../outside.duckdb"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Refresh(); err == nil {
+		t.Fatal("expected Refresh on unsafe manifest to fail")
+	}
+
+	serveText := scrapeMetricsText(t, serveMetrics)
+	if !strings.Contains(serveText, `ntfuzz_snapshot_publications_total{mode="serve",result="success"} 1`) {
+		t.Fatalf("expected 1 successful snapshot publication in:\n%s", serveText)
+	}
+	if !strings.Contains(serveText, `ntfuzz_snapshot_publications_total{mode="serve",result="error"} 1`) {
+		t.Fatalf("expected 1 failed snapshot publication in:\n%s", serveText)
+	}
+	if !strings.Contains(serveText, `ntfuzz_snapshot_publish_duration_seconds_count{mode="serve",result="success"} 1`) {
+		t.Fatalf("expected publication duration histogram count in:\n%s", serveText)
+	}
+
+	viewText := scrapeMetricsText(t, viewMetrics)
+	if !strings.Contains(viewText, `ntfuzz_snapshot_refreshes_total{mode="view",result="success"} 1`) {
+		t.Fatalf("expected 1 successful snapshot refresh in:\n%s", viewText)
+	}
+	if !strings.Contains(viewText, `ntfuzz_snapshot_refreshes_total{mode="view",result="error"} 1`) {
+		t.Fatalf("expected 1 failed snapshot refresh in:\n%s", viewText)
+	}
+	if !strings.Contains(viewText, `ntfuzz_snapshot_age_seconds{mode="view"} 12.5`) {
+		t.Fatalf("expected snapshot age of 12.5s in:\n%s", viewText)
+	}
+
+	// Publish a second valid snapshot and verify Refresh updates the snapshot age.
+	second, err := writer.PublishSnapshot(ctx, snapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewMetrics.SetClock(func() time.Time {
+		return second.PublishedAt.Add(3 * time.Second)
+	})
+	if err := v.Refresh(); err != nil {
+		t.Fatalf("Refresh second generation: %v", err)
+	}
+	viewText = scrapeMetricsText(t, viewMetrics)
+	if !strings.Contains(viewText, `ntfuzz_snapshot_refreshes_total{mode="view",result="success"} 2`) {
+		t.Fatalf("expected 2 successful snapshot refreshes in:\n%s", viewText)
+	}
+	if !strings.Contains(viewText, `ntfuzz_snapshot_age_seconds{mode="view"} 3`) {
+		t.Fatalf("expected updated snapshot age of 3s in:\n%s", viewText)
+	}
+}
+
+func scrapeMetricsText(t *testing.T, m *metrics.Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	m.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status=%d: %s", rec.Code, rec.Body.String())
+	}
+	return rec.Body.String()
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/NimbleMarkets/go-booba/serve"
 
 	"github.com/NimbleTerminal/ntfuzz/internal/api"
+	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
 	"github.com/NimbleTerminal/ntfuzz/internal/tui"
 )
 
@@ -22,11 +23,18 @@ var embeddedIndexHTML []byte
 
 // BridgeOptions configures the combined HTTP API + Booba TUI server.
 type BridgeOptions struct {
-	ListenAddr      string
-	RefreshInterval time.Duration
-	Debug           bool
-	ReadOnly        bool
-	Listener        net.Listener
+	ListenAddr        string
+	RefreshInterval   time.Duration
+	Debug             bool
+	ReadOnly          bool
+	Listener          net.Listener
+	MaxConnections    int
+	IdleTimeout       time.Duration
+	OriginPatterns    []string
+	ServerContext     context.Context
+	Metrics           *metrics.Metrics
+	MetricsListenAddr string
+	MetricsListener   net.Listener
 }
 
 // NewHandler constructs an http.Handler that serves both:
@@ -38,14 +46,29 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 		return nil, err
 	}
 
+	if opts.Metrics != nil {
+		if setter, ok := apiServer.(interface{ SetMetrics(*metrics.Metrics) }); ok {
+			setter.SetMetrics(opts.Metrics)
+		}
+	}
+
 	cfg := serve.DefaultConfig()
 	cfg.Host = host
 	cfg.Port = port
 	cfg.HTTP3Port = -1
 	cfg.Debug = opts.Debug
+	if len(opts.OriginPatterns) > 0 {
+		cfg.OriginPatterns = append([]string(nil), opts.OriginPatterns...)
+	}
 	if opts.ReadOnly {
 		cfg.MaxConnections = 32
 		cfg.IdleTimeout = 10 * time.Minute
+	}
+	if opts.MaxConnections > 0 {
+		cfg.MaxConnections = opts.MaxConnections
+	}
+	if opts.IdleTimeout > 0 {
+		cfg.IdleTimeout = opts.IdleTimeout
 	}
 
 	refresh := opts.RefreshInterval
@@ -53,11 +76,23 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 		refresh = 2 * time.Second
 	}
 
-	boobaServer := serve.NewServer(cfg, serve.WithSessionMiddleware(preserveResizeEvents))
+	var serverOpts []serve.Option
+	if opts.Metrics != nil {
+		serverOpts = append(serverOpts,
+			serve.WithConnectMiddleware(connectMetricsMiddleware(opts.Metrics)),
+			serve.WithSessionMiddleware(preserveResizeEvents, sessionMetricsMiddleware(opts.ServerContext, opts.Metrics)),
+		)
+	} else {
+		serverOpts = append(serverOpts, serve.WithSessionMiddleware(preserveResizeEvents))
+	}
+
+	boobaServer := serve.NewServer(cfg, serverOpts...)
 	boobaHandler, err := boobaServer.HTTPHandlerFor(func(sess serve.Session) (tea.Model, []tea.ProgramOption) {
-		client := api.NewClient(apiBaseURL)
-		if opts.ReadOnly {
+		var client *api.Client
+		if apiServer != nil {
 			client = api.NewLocalClient(apiServer)
+		} else {
+			client = api.NewClient(apiBaseURL)
 		}
 		m, err := tui.NewActionModelOptions(client, refresh, opts.ReadOnly)
 		if err != nil {
@@ -70,16 +105,25 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/", apiServer)
+	if apiServer != nil {
+		mux.Handle("/api/", apiServer)
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write(embeddedIndexHTML)
 			return
 		}
+		if opts.Metrics != nil && (r.URL.Path == "/ws" || r.URL.Path == "/wt") {
+			serveTrackedTerminalRequest(w, r, boobaHandler, opts.Metrics)
+			return
+		}
 		boobaHandler.ServeHTTP(w, r)
 	})
 
+	if opts.Metrics != nil {
+		return opts.Metrics.InstrumentHTTP(mux, api.IsInternalRequest), nil
+	}
 	return mux, nil
 }
 
@@ -99,9 +143,28 @@ func ListenAndServe(ctx context.Context, apiServer http.Handler, opts BridgeOpti
 	}
 	apiBaseURL := fmt.Sprintf("http://%s:%d", clientHost, port)
 
+	if opts.ServerContext == nil {
+		opts.ServerContext = ctx
+	}
+	if opts.Metrics == nil && (strings.TrimSpace(opts.MetricsListenAddr) != "" || opts.MetricsListener != nil) {
+		mode := metrics.ModeServe
+		if opts.ReadOnly {
+			mode = metrics.ModeView
+		}
+		opts.Metrics = metrics.New(mode)
+	}
+
 	handler, err := NewHandler(apiServer, apiBaseURL, opts)
 	if err != nil {
 		return err
+	}
+
+	if opts.Metrics != nil && (strings.TrimSpace(opts.MetricsListenAddr) != "" || opts.MetricsListener != nil) {
+		_, stopMetrics, err := opts.Metrics.StartServer(ctx, opts.MetricsListenAddr, opts.MetricsListener)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = stopMetrics() }()
 	}
 
 	httpServer := &http.Server{

@@ -16,6 +16,7 @@ import (
 
 	"github.com/NimbleTerminal/ntfuzz/internal/api"
 	boobabridge "github.com/NimbleTerminal/ntfuzz/internal/booba"
+	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
 	"github.com/NimbleTerminal/ntfuzz/internal/orchestrator"
 	"github.com/NimbleTerminal/ntfuzz/internal/store"
 	"github.com/NimbleTerminal/ntfuzz/internal/tui"
@@ -42,6 +43,8 @@ func newServeCmd() *cobra.Command {
 		snapshotInterval time.Duration
 		dbPath           string
 		listenAddr       string
+		metricsEnabled   bool
+		metricsListen    string
 		workers          int
 		roundInterval    time.Duration
 		noOrchestrator   bool
@@ -58,6 +61,15 @@ func newServeCmd() *cobra.Command {
 			if snapshotDir != "" && snapshotInterval <= 0 {
 				return fmt.Errorf("snapshot interval must be positive")
 			}
+			metricsAddr, err := metrics.ResolveListenAddr(metricsEnabled, metricsListen, metrics.DefaultServeMetricsPort)
+			if err != nil {
+				return err
+			}
+			var srvMetrics *metrics.Metrics
+			if metricsAddr != "" {
+				srvMetrics = metrics.New(metrics.ModeServe)
+			}
+
 			logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 			cfg, err := orchestrator.LoadConfig(configPath)
@@ -70,6 +82,9 @@ func newServeCmd() *cobra.Command {
 				return fmt.Errorf("open duckdb store %q: %w", dbPath, err)
 			}
 			defer func() { _ = st.Close() }()
+			if srvMetrics != nil {
+				st.SetMetrics(srvMetrics)
+			}
 			if snapshotDir != "" {
 				snapshotCtx, cancelSnapshots := context.WithCancel(ctx)
 				done := make(chan struct{})
@@ -121,15 +136,18 @@ func newServeCmd() *cobra.Command {
 				"component", "serve",
 				"listen", listenAddr,
 				"url", fmt.Sprintf("http://%s/", listenAddr),
+				"metrics_listen", metricsAddr,
 				"db", dbPath,
 				"projects", len(cfg.Projects),
 				"workers", workers,
 			)
 
 			return boobabridge.ListenAndServe(ctx, apiServer, boobabridge.BridgeOptions{
-				ListenAddr:      listenAddr,
-				RefreshInterval: 2 * time.Second,
-				Debug:           debug,
+				ListenAddr:        listenAddr,
+				RefreshInterval:   2 * time.Second,
+				Debug:             debug,
+				Metrics:           srvMetrics,
+				MetricsListenAddr: metricsAddr,
 			})
 		},
 	}
@@ -137,6 +155,8 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&configPath, "config", "c", "configs/projects.yaml", "Path to projects YAML config (read once at startup; uses embedded default if not found)")
 	cmd.Flags().StringVarP(&dbPath, "db", "d", "ntfuzz.duckdb", "Path to DuckDB database file")
 	cmd.Flags().StringVarP(&listenAddr, "listen", "l", "127.0.0.1:8080", "HTTP listen address for API and Booba web TUI")
+	cmd.Flags().BoolVar(&metricsEnabled, "metrics", false, "Enable the loopback Prometheus /metrics listener (defaults to 127.0.0.1:9090)")
+	cmd.Flags().StringVar(&metricsListen, "metrics-listen", "", "HTTP listen address for Prometheus /metrics endpoint (disabled by default; binds to 127.0.0.1 when host is omitted)")
 	cmd.Flags().IntVarP(&workers, "workers", "w", 2, "Number of concurrent local fuzz workers (each capped at GOMAXPROCS=1)")
 	cmd.Flags().DurationVar(&roundInterval, "interval", 5*time.Second, "Pause interval between fuzzing rounds")
 	cmd.Flags().StringVar(&snapshotDir, "snapshot-dir", "", "Publish immutable DuckDB generations in this directory")

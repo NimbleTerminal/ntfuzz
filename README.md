@@ -174,3 +174,83 @@ Queries are capped at 10,000 rows, 16 MiB output, and five seconds. The HTTP API
 exposes fixed dashboard queries, not arbitrary user SQL. Set process memory/CPU
 limits in deployment as well. Public snapshots expose the configured fleet's
 project/run/crash details; publish only data intended for public viewing.
+
+---
+
+## Observability & Prometheus Metrics
+
+Both `ntfuzz serve` and `ntfuzz view` support an optional, isolated Prometheus `/metrics` listener. Metrics are **disabled by default**, are **never exposed on the dashboard/API listener (`--listen`)**, and **never write access data into DuckDB or published snapshots**.
+
+### CLI Flags
+
+| Command | Flag | Default | Description |
+| --- | --- | --- | --- |
+| `ntfuzz serve` | `--metrics` | `false` | Enable the loopback Prometheus `/metrics` listener on `127.0.0.1:9090` (unless `--metrics-listen` is set) |
+| `ntfuzz serve` | `--metrics-listen` | `""` (disabled) | Explicit listen address for `/metrics` (binds to `127.0.0.1` when host is omitted, e.g. `:9090`) |
+| `ntfuzz view` | `--metrics` | `false` | Enable the loopback Prometheus `/metrics` listener on `127.0.0.1:9091` (unless `--metrics-listen` is set) |
+| `ntfuzz view` | `--metrics-listen` | `""` (disabled) | Explicit listen address for `/metrics` (binds to `127.0.0.1` when host is omitted, e.g. `:9091`) |
+
+### Exposed Metrics
+
+All metrics use bounded labels (`mode`, `route`, `method`, `status_class`, `reason`, `result`). High-cardinality or sensitive values—such as IP addresses, session IDs, arbitrary URLs, query strings, target names, repository names, or terminal input/output contents—are never recorded in labels. Internal in-process API calls made by browser terminal sessions are excluded from external HTTP request metrics.
+
+| Metric Name | Type | Unit | Labels | Modes | Description |
+| --- | --- | --- | --- | --- | --- |
+| `ntfuzz_http_requests_total` | Counter | requests | `mode`, `route`, `method`, `status_class` | `serve`, `view` | External HTTP requests handled (`route` templates: `/`, `/ws`, `/wt`, `/cert-hash`, `/static/*`, `/api/projects`, `/api/targets`, `/api/runs`, `/api/crashes`, `/api/crashes/{id}/fix`, `/api/coverage/history`, `/api/status`, `other`) |
+| `ntfuzz_http_request_duration_seconds` | Histogram | seconds | `mode`, `route`, `method`, `status_class` | `serve`, `view` | External HTTP request latency in seconds (for `/ws`, measures HTTP upgrade handshake latency) |
+| `ntfuzz_terminal_sessions_active` | Gauge | sessions | `mode` | `serve`, `view` | Currently active browser-terminal sessions |
+| `ntfuzz_terminal_sessions_opened_total` | Counter | sessions | `mode` | `serve`, `view` | Total browser-terminal sessions opened |
+| `ntfuzz_terminal_sessions_closed_total` | Counter | sessions | `mode`, `reason` | `serve`, `view` | Closed browser-terminal sessions (`reason`: `client_disconnect`, `idle_timeout`, `server_shutdown`, `error`) |
+| `ntfuzz_terminal_sessions_rejected_total` | Counter | connections | `mode`, `reason` | `serve`, `view` | Rejected terminal connection attempts (`reason`: `connection_limit`, `unauthorized`, `origin`, `handshake`, `error`) |
+| `ntfuzz_terminal_session_duration_seconds` | Histogram | seconds | `mode`, `reason` | `serve`, `view` | Duration of closed browser-terminal sessions in seconds |
+| `ntfuzz_terminal_bytes_received_total` | Counter | bytes | `mode` | `serve`, `view` | Terminal input payload bytes written from clients to the PTY session |
+| `ntfuzz_terminal_bytes_sent_total` | Counter | bytes | `mode` | `serve`, `view` | Terminal output payload bytes read from the PTY session and sent to clients |
+| `ntfuzz_snapshot_publications_total` | Counter | publications | `mode`, `result` | `serve` | Immutable snapshot publication attempts (`result`: `success`, `error`) |
+| `ntfuzz_snapshot_publish_duration_seconds` | Histogram | seconds | `mode`, `result` | `serve` | Duration of immutable snapshot publication attempts in seconds |
+| `ntfuzz_orchestrator_workers_active` | Gauge | workers | `mode` | `serve` | Currently active fuzzing worker jobs in live orchestrator mode |
+| `ntfuzz_orchestrator_workers_configured` | Gauge | workers | `mode` | `serve` | Configured fuzzing worker concurrency in live orchestrator mode |
+| `ntfuzz_snapshot_age_seconds` | Gauge | seconds | `mode` | `view` | Age in seconds of the currently loaded immutable snapshot generation |
+| `ntfuzz_snapshot_refreshes_total` | Counter | refreshes | `mode`, `result` | `view` | Snapshot refresh checks in viewer mode (`result`: `success`, `error`) |
+
+> **Transport & Process Boundaries**:
+> - Counters and histograms are held in process memory and **reset on process restart**. Historical retention, alerting, and long-term aggregation require an external Prometheus-compatible collector.
+> - `ntfuzz_terminal_bytes_received_total` and `ntfuzz_terminal_bytes_sent_total` measure terminal PTY payload bytes via `go-booba/serve` `SessionMiddleware` (`InputWriter`/`OutputReader`). WebSocket/WebTransport framing bytes and control messages (`MsgResize`, `MsgPing`/`MsgPong`, `MsgOptions`, `MsgClose`) are handled internally by the transport layer and are not included in PTY byte counters.
+> - `ntfuzz view` only exposes metrics for the viewer process and the age/refresh health of its loaded snapshot; it never fabricates live orchestrator worker activity from snapshot data.
+
+### Local Scraping Example
+
+Start `serve` and `view` with loopback metrics listeners:
+
+```sh
+ntfuzz serve --config fleet.yaml --db live.duckdb --listen 127.0.0.1:8080 \
+  --snapshot-dir /var/lib/ntfuzz/public --snapshot-interval 1m \
+  --metrics-listen 127.0.0.1:9090
+
+ntfuzz view --snapshots /var/lib/ntfuzz/public --listen 127.0.0.1:8081 \
+  --refresh 10s --metrics-listen 127.0.0.1:9091
+```
+
+Inspect metrics locally:
+
+```sh
+curl -s http://127.0.0.1:9090/metrics | grep '^ntfuzz_'
+curl -s http://127.0.0.1:9091/metrics | grep '^ntfuzz_'
+```
+
+Example `prometheus.yml` scrape configuration:
+
+```yaml
+scrape_configs:
+  - job_name: ntfuzz
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - 127.0.0.1:9090
+          - 127.0.0.1:9091
+```
+
+### Service Metrics vs. Edge / CDN Analytics
+
+- **`ntfuzz` service metrics (`/metrics`)** measure origin-level process health: HTTP requests reaching the Go server, WebSocket terminal session concurrency, connection rejections (`connection_limit`, `origin`, `handshake`), session durations and disconnect causes (`client_disconnect`, `idle_timeout`, `server_shutdown`), PTY terminal byte throughput, and DuckDB snapshot publication/refresh latency and staleness.
+- **CDN / reverse-proxy analytics** (such as Cloudflare or ingress logs configured in deployment infrastructure) measure edge traffic before it reaches `ntfuzz`: CDN cache hits on static assets, WAF/rate-limit blocks at the edge, TLS handshake versions, geographic/ASN distributions, and unique visitor estimates. Keep CDN configuration, collectors, dashboards, and retention policies in deployment infrastructure rather than inside `ntfuzz`.
+

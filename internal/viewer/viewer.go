@@ -10,29 +10,75 @@ import (
 	"time"
 
 	"github.com/NimbleTerminal/ntfuzz/internal/api"
+	"github.com/NimbleTerminal/ntfuzz/internal/metrics"
 	"github.com/NimbleTerminal/ntfuzz/internal/store"
 )
 
 type Viewer struct {
-	dir     string
-	mu      sync.RWMutex
-	current store.Snapshot
-	db      *store.Store
-	handler http.Handler
+	dir        string
+	mu         sync.RWMutex
+	current    store.Snapshot
+	db         *store.Store
+	handler    http.Handler
+	metrics    *metrics.Metrics
+	refreshes  int64
+	refreshErr int64
 }
 
 func Open(dir string) (*Viewer, error) {
-	v := &Viewer{dir: dir}
+	return OpenWithMetrics(dir, nil)
+}
+
+func OpenWithMetrics(dir string, m *metrics.Metrics) (*Viewer, error) {
+	v := &Viewer{dir: dir, metrics: m}
 	if err := v.Refresh(); err != nil {
 		return nil, err
 	}
 	return v, nil
 }
-func (v *Viewer) Refresh() error {
+
+// SetMetrics attaches a Prometheus metrics collector to the viewer and syncs
+// the currently loaded snapshot timestamp and prior refresh counts.
+func (v *Viewer) SetMetrics(m *metrics.Metrics) {
+	if v == nil || m == nil {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.metrics == m {
+		return
+	}
+	v.metrics = m
+	if !v.current.PublishedAt.IsZero() {
+		m.SetSnapshotPublishedAt(v.current.PublishedAt)
+	}
+	m.AddSnapshotRefreshes(v.refreshes, v.refreshErr)
+}
+
+func (v *Viewer) recordRefreshResult(publishedAt time.Time, err error) {
+	v.mu.Lock()
+	if err != nil {
+		v.refreshErr++
+	} else {
+		v.refreshes++
+	}
+	m := v.metrics
+	v.mu.Unlock()
+	if m != nil {
+		m.RecordSnapshotRefresh(publishedAt, err)
+	}
+}
+
+func (v *Viewer) Refresh() (err error) {
+	var publishedAt time.Time
+	defer func() {
+		v.recordRefreshResult(publishedAt, err)
+	}()
 	meta, err := store.ReadSnapshot(v.dir)
 	if err != nil {
 		return err
 	}
+	publishedAt = meta.PublishedAt
 	v.mu.RLock()
 	same := meta.File == v.current.File
 	v.mu.RUnlock()

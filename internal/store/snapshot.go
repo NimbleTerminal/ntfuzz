@@ -20,10 +20,41 @@ type Snapshot struct {
 	SchemaVersion int       `json:"schema_version"`
 }
 
+// SnapshotMetricsRecorder records snapshot publication latency and outcomes.
+type SnapshotMetricsRecorder interface {
+	RecordSnapshotPublication(duration time.Duration, err error)
+}
+
+// SetMetrics attaches an optional recorder for snapshot publication metrics.
+func (s *Store) SetMetrics(m SnapshotMetricsRecorder) {
+	if s == nil {
+		return
+	}
+	s.metricsMu.Lock()
+	s.metrics = m
+	s.metricsMu.Unlock()
+}
+
+func (s *Store) getMetrics() SnapshotMetricsRecorder {
+	if s == nil {
+		return nil
+	}
+	s.metricsMu.RLock()
+	m := s.metrics
+	s.metricsMu.RUnlock()
+	return m
+}
+
 // PublishSnapshot copies the database through the writer's own connection.
 // It never copies a live database file or its WAL. Store mutations briefly wait
 // while COPY takes its consistent source view; fuzz subprocesses keep running.
-func (s *Store) PublishSnapshot(ctx context.Context, dir string) (Snapshot, error) {
+func (s *Store) PublishSnapshot(ctx context.Context, dir string) (snap Snapshot, err error) {
+	start := time.Now()
+	defer func() {
+		if m := s.getMetrics(); m != nil {
+			m.RecordSnapshotPublication(time.Since(start), err)
+		}
+	}()
 	if s.readonly != nil {
 		return Snapshot{}, ErrReadOnly
 	}
@@ -33,7 +64,7 @@ func (s *Store) PublishSnapshot(ctx context.Context, dir string) (Snapshot, erro
 	meta := Snapshot{File: fmt.Sprintf("snapshot-%d.duckdb", time.Now().UTC().UnixNano()), PublishedAt: time.Now().UTC(), SchemaVersion: CurrentSchemaVersion}
 	path := filepath.Join(dir, meta.File)
 	s.mu.Lock()
-	err := s.copySnapshotLocked(ctx, path)
+	err = s.copySnapshotLocked(ctx, path)
 	s.mu.Unlock()
 	if err != nil {
 		_ = os.Remove(path)

@@ -2,8 +2,24 @@
 
 ## Unreleased — 2026-11-05
 
+- Add optional Prometheus-compatible observability (`internal/metrics`) for both
+  `ntfuzz serve` and `ntfuzz view` on a dedicated loopback-by-default listener
+  (`--metrics` / `--metrics-listen`), isolated from the dashboard listener:
+  - External HTTP request counts and latency histograms with bounded labels
+    (`mode`, `route`, `method`, `status_class`), excluding in-process TUI API
+    calls while preserving `http.Hijacker`, `http.Flusher`, and `Unwrap` for
+    WebSocket upgrades and `http.ResponseController`.
+  - Browser-terminal session gauges, open/close/reject counters, session
+    duration histograms, bounded rejection/disconnect reason categories, and
+    PTY terminal byte counters via `go-booba/serve` middleware hooks while
+    preserving idle timeouts, connection limits, and live terminal resize events.
+  - Orchestrator snapshot publication counters/duration histograms and live
+    worker gauges in `serve` mode, plus current snapshot age and refresh
+    success/error counters in `view` mode without writing access metrics into
+    DuckDB or fabricating worker activity in viewer mode.
 - Preserve live WebSocket resize notifications through the public viewer's
   idle-timeout wrapper, with a real-PTY resize regression test.
+- Keep populated fleet tables within resized terminal dimensions.
 
 ## Unreleased — 2026-11-04
 

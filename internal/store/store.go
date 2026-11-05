@@ -22,9 +22,11 @@ var ErrNotFound = errors.New("record not found")
 
 // Store manages persistence of fuzzing projects, targets, runs, and crashes in DuckDB.
 type Store struct {
-	db       *sql.DB
-	readonly *ntduckbox.DB
-	mu       sync.Mutex
+	db        *sql.DB
+	readonly  *ntduckbox.DB
+	mu        sync.Mutex
+	metricsMu sync.RWMutex
+	metrics   SnapshotMetricsRecorder
 }
 
 // ProjectSyncInput carries repository checkout metadata when syncing a project.
