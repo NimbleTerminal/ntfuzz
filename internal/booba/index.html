@@ -22,34 +22,96 @@
             flex-direction: column;
         }
         .topbar {
+            --ntfuzz-accent: #38bdf8;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 12px;
             padding: 6px 14px;
             background: #161f2c;
             border-bottom: 1px solid #2d3f56;
             font-size: 13px;
+            min-width: 0;
         }
         .brand {
             display: flex;
             align-items: center;
             gap: 10px;
+            min-width: 0;
+            flex: 1 1 auto;
+            overflow: hidden;
             font-weight: 600;
-            color: #38bdf8;
+            color: var(--ntfuzz-accent, #38bdf8);
+        }
+        .brand-wordmark {
+            color: var(--ntfuzz-accent, #38bdf8);
+            text-decoration: none;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            flex-shrink: 0;
+            border-radius: 3px;
+        }
+        .brand-wordmark:hover {
+            text-decoration: underline;
+            text-underline-offset: 3px;
+        }
+        .brand-wordmark:focus-visible,
+        .brand-operator:focus-visible {
+            outline: 2px solid var(--ntfuzz-accent, #38bdf8);
+            outline-offset: 2px;
+        }
+        .brand-sep {
+            color: #64748b;
+            font-weight: 400;
+            flex-shrink: 0;
+            user-select: none;
+        }
+        .brand-operator {
+            color: #e4edf7;
+            font-weight: 600;
+            text-decoration: none;
+            min-width: 0;
+            max-width: 32ch;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            border-radius: 3px;
+        }
+        a.brand-operator {
+            text-decoration: underline;
+            text-decoration-color: var(--ntfuzz-accent, #38bdf8);
+            text-underline-offset: 3px;
+        }
+        a.brand-operator:hover {
+            color: var(--ntfuzz-accent, #38bdf8);
         }
         .brand-sub {
             color: #94a3b8;
             font-weight: 400;
             font-family: ui-monospace, monospace;
             font-size: 12px;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .status {
             display: flex;
             align-items: center;
             gap: 8px;
+            flex-shrink: 0;
+            white-space: nowrap;
             font-family: ui-monospace, monospace;
             font-size: 12px;
             color: #94a3b8;
+        }
+        @media (max-width: 640px) {
+            .brand-sub {
+                display: none;
+            }
+            .brand-operator {
+                max-width: 42vw;
+            }
         }
         .status-dot {
             width: 8px;
@@ -84,7 +146,7 @@
 <body>
     <header class="topbar">
         <div class="brand">
-            <span>NTFUZZ</span>
+            <a class="brand-wordmark" href="https://github.com/NimbleTerminal/ntfuzz" target="_blank" rel="noopener noreferrer">NTFUZZ</a>
             <span class="brand-sub" id="program-summary">Ghostty / Booba Live TUI</span>
         </div>
         <div class="status">
@@ -97,7 +159,6 @@
 
     <script type="module">
         import { BoobaTerminal, installActionBar, resolveBoobaURLs } from './static/booba/booba.js';
-        import { installRendererHud, parseRendererFromURL } from './static/ntwebterm/ntwebterm.js';
 
         const dot = document.getElementById('status-dot');
         const text = document.getElementById('status-text');
@@ -107,7 +168,7 @@
             const booba = new BoobaTerminal('terminal-container', {
                 fontSize: 14,
                 allowOSC7501Actions: true,
-                renderer: parseRendererFromURL(),
+                renderer: 'auto',
                 theme: {
                     background: '#10151d',
                     foreground: '#e2e8f0',
@@ -141,8 +202,6 @@
                 openKeyboard: () => booba.focus(),
                 onLayout: () => booba.fitAddon?.fit(),
             });
-
-            installRendererHud(booba.terminal);
 
             const urls = resolveBoobaURLs(document.baseURI);
             booba.connectWebSocket(urls.wsUrl);

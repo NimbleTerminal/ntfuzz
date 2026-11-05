@@ -177,6 +177,42 @@ project/run/crash details; publish only data intended for public viewing.
 
 ---
 
+## Browser Dashboard Branding
+
+Both `ntfuzz serve` and `ntfuzz view` support optional operator branding in the web terminal header while keeping the upstream **NTFUZZ** wordmark linked to `https://github.com/NimbleTerminal/ntfuzz`.
+
+### Configuration & Precedence
+
+Branding is configured via CLI flags or environment variables (independent of `projects.yaml` and snapshot database files, so standalone `ntfuzz view` processes require no access to the writer's config). Settings are resolved in the following order of precedence:
+
+1. **CLI flags** (`--brand-name`, `--brand-url`, `--brand-accent`)
+2. **Environment variables** (`NTFUZZ_BRAND_NAME`, `NTFUZZ_BRAND_URL`, `NTFUZZ_BRAND_ACCENT`)
+3. **Built-in defaults** (unconfigured operator badge, default header accent `#38bdf8`)
+
+| CLI Flag | Environment Variable | Default | Validation / Behavior |
+| --- | --- | --- | --- |
+| `--brand-name` | `NTFUZZ_BRAND_NAME` | `""` (omitted) | Rendered as escaped plain text beside `NTFUZZ` (truncates with ellipsis on narrow screens) |
+| `--brand-url` | `NTFUZZ_BRAND_URL` | `""` (unlinked) | Optional website link for `--brand-name`; must be a valid `http://` or `https://` URL |
+| `--brand-accent` | `NTFUZZ_BRAND_ACCENT` | `#38bdf8` | Scoped `--ntfuzz-accent` color on `.topbar`; must match 6-digit `#RRGGBB` hex |
+
+### Generic Example
+
+```sh
+# Via CLI flags (works identically for serve and view)
+ntfuzz view --snapshots /var/lib/ntfuzz/public --listen 127.0.0.1:8081 \
+  --brand-name "Example Security" \
+  --brand-url "https://security.example.com" \
+  --brand-accent "#38bdf8"
+
+# Or via environment variables
+export NTFUZZ_BRAND_NAME="Example Security"
+export NTFUZZ_BRAND_URL="https://security.example.com"
+export NTFUZZ_BRAND_ACCENT="#38bdf8"
+ntfuzz serve --config fleet.yaml --db live.duckdb --listen 127.0.0.1:8080
+```
+
+---
+
 ## Observability & Prometheus Metrics
 
 Both `ntfuzz serve` and `ntfuzz view` support an optional, isolated Prometheus `/metrics` listener. Metrics are **disabled by default**, are **never exposed on the dashboard/API listener (`--listen`)**, and **never write access data into DuckDB or published snapshots**.
@@ -252,5 +288,5 @@ scrape_configs:
 ### Service Metrics vs. Edge / CDN Analytics
 
 - **`ntfuzz` service metrics (`/metrics`)** measure origin-level process health: HTTP requests reaching the Go server, WebSocket terminal session concurrency, connection rejections (`connection_limit`, `origin`, `handshake`), session durations and disconnect causes (`client_disconnect`, `idle_timeout`, `server_shutdown`), PTY terminal byte throughput, and DuckDB snapshot publication/refresh latency and staleness.
-- **CDN / reverse-proxy analytics** (such as Cloudflare or ingress logs configured in deployment infrastructure) measure edge traffic before it reaches `ntfuzz`: CDN cache hits on static assets, WAF/rate-limit blocks at the edge, TLS handshake versions, geographic/ASN distributions, and unique visitor estimates. Keep CDN configuration, collectors, dashboards, and retention policies in deployment infrastructure rather than inside `ntfuzz`.
+- **CDN / reverse-proxy analytics** (such as edge CDN or ingress logs configured in deployment infrastructure) measure edge traffic before it reaches `ntfuzz`: CDN cache hits on static assets, WAF/rate-limit blocks at the edge, TLS handshake versions, geographic/ASN distributions, and unique visitor estimates. Keep CDN configuration, collectors, dashboards, and retention policies in deployment infrastructure rather than inside `ntfuzz`.
 

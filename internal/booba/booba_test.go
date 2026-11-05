@@ -586,3 +586,172 @@ func labelsMatch(m *dto.Metric, want map[string]string) bool {
 	}
 	return true
 }
+
+func TestBrandingDefaultsConfiguredEscapingAndValidation(t *testing.T) {
+	// 1. Default unconfigured output retains clean NTFUZZ header linked to canonical repo.
+	defaultHTMLBytes, err := RenderIndexHTML(Branding{})
+	if err != nil {
+		t.Fatalf("RenderIndexHTML default: %v", err)
+	}
+	defaultHTML := string(defaultHTMLBytes)
+	if !strings.Contains(defaultHTML, `<a class="brand-wordmark" href="https://github.com/NimbleTerminal/ntfuzz" target="_blank" rel="noopener noreferrer">NTFUZZ</a>`) {
+		t.Fatalf("default HTML missing canonical NTFUZZ repo link:\n%s", defaultHTML)
+	}
+	if strings.Contains(defaultHTML, `<span class="brand-sep"`) || strings.Contains(defaultHTML, `class="brand-operator"`) {
+		t.Fatalf("unconfigured HTML should not render operator separator or badge:\n%s", defaultHTML)
+	}
+	if strings.Contains(defaultHTML, `style="--ntfuzz-accent:`) {
+		t.Fatalf("unconfigured HTML should not set inline accent override:\n%s", defaultHTML)
+	}
+	if !strings.Contains(defaultHTML, `renderer: 'auto'`) || strings.Contains(defaultHTML, "installRendererHud") {
+		t.Fatalf("expected renderer: 'auto' without renderer HUD overlay:\n%s", defaultHTML)
+	}
+	for _, preserved := range []string{`id="status-dot"`, `id="status-text"`, `id="terminal-container"`, `id="action-controls"`, `.booba-action--keyboard`} {
+		if !strings.Contains(defaultHTML, preserved) {
+			t.Fatalf("default HTML missing required UI element %q", preserved)
+		}
+	}
+
+	// 2. Display name without URL renders a non-link span beside NTFUZZ.
+	nameOnlyBytes, err := RenderIndexHTML(Branding{Name: "Example Fleet"})
+	if err != nil {
+		t.Fatalf("RenderIndexHTML name-only: %v", err)
+	}
+	nameOnlyHTML := string(nameOnlyBytes)
+	if !strings.Contains(nameOnlyHTML, `<span class="brand-operator" title="Example Fleet">Example Fleet</span>`) {
+		t.Fatalf("expected non-link brand-operator span:\n%s", nameOnlyHTML)
+	}
+	if !strings.Contains(nameOnlyHTML, `href="https://github.com/NimbleTerminal/ntfuzz"`) {
+		t.Fatalf("NTFUZZ project identity link must remain distinct:\n%s", nameOnlyHTML)
+	}
+
+	// 3. Configured name, URL, and uppercase #RRGGBB accent color.
+	configuredBytes, err := RenderIndexHTML(Branding{
+		Name:        "Example Lab",
+		URL:         "https://lab.example.org/fuzz?team=core&env=prod",
+		AccentColor: "#22C55E",
+	})
+	if err != nil {
+		t.Fatalf("RenderIndexHTML configured: %v", err)
+	}
+	configuredHTML := string(configuredBytes)
+	if !strings.Contains(configuredHTML, `<header class="topbar" style="--ntfuzz-accent: #22c55e;">`) {
+		t.Fatalf("expected normalized scoped --ntfuzz-accent on topbar:\n%s", configuredHTML)
+	}
+	if !strings.Contains(configuredHTML, `<a class="brand-operator" href="https://lab.example.org/fuzz?team=core&amp;env=prod" target="_blank" rel="noopener noreferrer" title="Example Lab">Example Lab</a>`) {
+		t.Fatalf("expected linked operator badge with escaped URL:\n%s", configuredHTML)
+	}
+
+	// 4. HTML escaping of operator display name (never raw HTML).
+	xssBytes, err := RenderIndexHTML(Branding{
+		Name: `<script>alert("xss")</script> & 'Corp'`,
+		URL:  "https://example.org",
+	})
+	if err != nil {
+		t.Fatalf("RenderIndexHTML escaping: %v", err)
+	}
+	xssHTML := string(xssBytes)
+	if strings.Contains(xssHTML, `<script>alert("xss")</script>`) {
+		t.Fatalf("operator name was not escaped:\n%s", xssHTML)
+	}
+	if !strings.Contains(xssHTML, `&lt;script&gt;alert(&#34;xss&#34;)&lt;/script&gt; &amp; &#39;Corp&#39;`) {
+		t.Fatalf("expected HTML-escaped operator name in:\n%s", xssHTML)
+	}
+
+	// 5. Precedence: CLI flags > environment variables > defaults.
+	env := map[string]string{
+		EnvBrandName:   "Env Org",
+		EnvBrandURL:    "https://env.example.org",
+		EnvBrandAccent: "#112233",
+	}
+	getenv := func(k string) string { return env[k] }
+	fromEnv, err := ResolveBranding(Branding{}, getenv)
+	if err != nil {
+		t.Fatalf("ResolveBranding from env: %v", err)
+	}
+	if fromEnv.Name != "Env Org" || fromEnv.URL != "https://env.example.org" || fromEnv.AccentColor != "#112233" {
+		t.Fatalf("unexpected env branding: %+v", fromEnv)
+	}
+	fromFlags, err := ResolveBranding(Branding{Name: "Flag Org", AccentColor: "#AABBCC"}, getenv)
+	if err != nil {
+		t.Fatalf("ResolveBranding flag override: %v", err)
+	}
+	if fromFlags.Name != "Flag Org" || fromFlags.URL != "https://env.example.org" || fromFlags.AccentColor != "#aabbcc" {
+		t.Fatalf("expected flag override with env fallback, got %+v", fromFlags)
+	}
+
+	// 6. Invalid URLs, colors, and control characters are rejected.
+	invalidCases := []Branding{
+		{Name: "Bad\nName"},
+		{Name: "Org", URL: "javascript:alert(1)"},
+		{Name: "Org", URL: "data:text/html,<script>alert(1)</script>"},
+		{Name: "Org", URL: "ftp://example.org/file"},
+		{Name: "Org", URL: "//example.org"},
+		{Name: "Org", URL: "/relative/path"},
+		{Name: "Org", URL: "https://"},
+		{Name: "Org", URL: "https://user:pass@example.org"},
+		{Name: "Org", URL: "https://example.org/with space"},
+		{Name: "Org", AccentColor: "red"},
+		{Name: "Org", AccentColor: "#fff"},
+		{Name: "Org", AccentColor: "#12345g"},
+		{Name: "Org", AccentColor: "#123456; background: url(evil)"},
+		{Name: "Org", AccentColor: "var(--evil)"},
+	}
+	for _, tc := range invalidCases {
+		if _, err := ValidateBranding(tc); err == nil {
+			t.Errorf("expected ValidateBranding(%+v) to fail", tc)
+		}
+	}
+}
+
+func TestBrandingEquivalentInServeAndView(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "brand.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	branding := Branding{
+		Name:        "Acme Security Fleet",
+		URL:         "https://security.example.com",
+		AccentColor: "#14b8a6",
+	}
+
+	serveHandler, err := NewHandler(api.NewServer(st, nil), "", BridgeOptions{
+		ListenAddr: "127.0.0.1:8080",
+		ReadOnly:   false,
+		Branding:   branding,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler serve: %v", err)
+	}
+
+	viewHandler, err := NewHandler(api.NewSnapshotServer(st, store.Snapshot{PublishedAt: time.Now()}), "", BridgeOptions{
+		ListenAddr: "127.0.0.1:8081",
+		ReadOnly:   true,
+		Branding:   branding,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler view: %v", err)
+	}
+
+	recServe := httptest.NewRecorder()
+	serveHandler.ServeHTTP(recServe, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	recView := httptest.NewRecorder()
+	viewHandler.ServeHTTP(recView, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if recServe.Code != http.StatusOK || recView.Code != http.StatusOK {
+		t.Fatalf("unexpected status codes: serve=%d view=%d", recServe.Code, recView.Code)
+	}
+	if recServe.Body.String() != recView.Body.String() {
+		t.Fatal("serve and view produced different HTML for identical branding")
+	}
+	body := recServe.Body.String()
+	if !strings.Contains(body, `style="--ntfuzz-accent: #14b8a6;"`) ||
+		!strings.Contains(body, `href="https://security.example.com"`) ||
+		!strings.Contains(body, `>Acme Security Fleet</a>`) ||
+		!strings.Contains(body, `href="https://github.com/NimbleTerminal/ntfuzz"`) {
+		t.Fatalf("rendered HTML missing expected branding elements:\n%s", body)
+	}
+}

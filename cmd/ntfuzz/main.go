@@ -45,6 +45,7 @@ func newServeCmd() *cobra.Command {
 		listenAddr       string
 		metricsEnabled   bool
 		metricsListen    string
+		brandFlags       boobabridge.Branding
 		workers          int
 		roundInterval    time.Duration
 		noOrchestrator   bool
@@ -60,6 +61,10 @@ func newServeCmd() *cobra.Command {
 
 			if snapshotDir != "" && snapshotInterval <= 0 {
 				return fmt.Errorf("snapshot interval must be positive")
+			}
+			branding, err := boobabridge.ResolveBranding(brandFlags, os.Getenv)
+			if err != nil {
+				return err
 			}
 			metricsAddr, err := metrics.ResolveListenAddr(metricsEnabled, metricsListen, metrics.DefaultServeMetricsPort)
 			if err != nil {
@@ -146,6 +151,7 @@ func newServeCmd() *cobra.Command {
 				ListenAddr:        listenAddr,
 				RefreshInterval:   2 * time.Second,
 				Debug:             debug,
+				Branding:          branding,
 				Metrics:           srvMetrics,
 				MetricsListenAddr: metricsAddr,
 			})
@@ -157,6 +163,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&listenAddr, "listen", "l", "127.0.0.1:8080", "HTTP listen address for API and Booba web TUI")
 	cmd.Flags().BoolVar(&metricsEnabled, "metrics", false, "Enable the loopback Prometheus /metrics listener (defaults to 127.0.0.1:9090)")
 	cmd.Flags().StringVar(&metricsListen, "metrics-listen", "", "HTTP listen address for Prometheus /metrics endpoint (disabled by default; binds to 127.0.0.1 when host is omitted)")
+	boobabridge.AddBrandingFlags(cmd.Flags(), &brandFlags)
 	cmd.Flags().IntVarP(&workers, "workers", "w", 2, "Number of concurrent local fuzz workers (each capped at GOMAXPROCS=1)")
 	cmd.Flags().DurationVar(&roundInterval, "interval", 5*time.Second, "Pause interval between fuzzing rounds")
 	cmd.Flags().StringVar(&snapshotDir, "snapshot-dir", "", "Publish immutable DuckDB generations in this directory")

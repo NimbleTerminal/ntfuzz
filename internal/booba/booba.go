@@ -32,6 +32,7 @@ type BridgeOptions struct {
 	IdleTimeout       time.Duration
 	OriginPatterns    []string
 	ServerContext     context.Context
+	Branding          Branding
 	Metrics           *metrics.Metrics
 	MetricsListenAddr string
 	MetricsListener   net.Listener
@@ -42,6 +43,11 @@ type BridgeOptions struct {
 //   - /, /ws, /static/* Booba Ghostty/ntwebterm browser TUI sessions
 func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (http.Handler, error) {
 	host, port, err := parseHostPort(opts.ListenAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	renderedIndexHTML, err := RenderIndexHTML(opts.Branding)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +117,7 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write(embeddedIndexHTML)
+			_, _ = w.Write(renderedIndexHTML)
 			return
 		}
 		if opts.Metrics != nil && (r.URL.Path == "/ws" || r.URL.Path == "/wt") {

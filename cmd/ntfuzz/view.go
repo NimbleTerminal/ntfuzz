@@ -18,11 +18,16 @@ import (
 func newViewCmd() *cobra.Command {
 	var dir, listen, metricsListen string
 	var metricsEnabled bool
+	var brandFlags booba.Branding
 	var listenFD int
 	var interval time.Duration
 	cmd := &cobra.Command{Use: "view", Short: "Serve immutable snapshots through a restricted read-only web terminal and API", RunE: func(cmd *cobra.Command, args []string) error {
 		if interval <= 0 {
 			return fmt.Errorf("refresh interval must be positive")
+		}
+		branding, err := booba.ResolveBranding(brandFlags, os.Getenv)
+		if err != nil {
+			return err
 		}
 		metricsAddr, err := metrics.ResolveListenAddr(metricsEnabled, metricsListen, metrics.DefaultViewMetricsPort)
 		if err != nil {
@@ -46,6 +51,7 @@ func newViewCmd() *cobra.Command {
 			ListenAddr:        listen,
 			RefreshInterval:   interval,
 			ReadOnly:          true,
+			Branding:          branding,
 			Metrics:           viewMetrics,
 			MetricsListenAddr: metricsAddr,
 		}
@@ -66,6 +72,7 @@ func newViewCmd() *cobra.Command {
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8081", "Viewer listen address")
 	cmd.Flags().BoolVar(&metricsEnabled, "metrics", false, "Enable the loopback Prometheus /metrics listener (defaults to 127.0.0.1:9091)")
 	cmd.Flags().StringVar(&metricsListen, "metrics-listen", "", "HTTP listen address for Prometheus /metrics endpoint (disabled by default; binds to 127.0.0.1 when host is omitted)")
+	booba.AddBrandingFlags(cmd.Flags(), &brandFlags)
 	cmd.Flags().DurationVar(&interval, "refresh", 10*time.Second, "Check for a new published generation")
 	return cmd
 }

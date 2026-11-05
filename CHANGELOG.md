@@ -2,6 +2,16 @@
 
 ## Unreleased — 2026-11-05
 
+- Add optional browser dashboard branding (`--brand-name`, `--brand-url`,
+  `--brand-accent` and `NTFUZZ_BRAND_NAME`, `NTFUZZ_BRAND_URL`,
+  `NTFUZZ_BRAND_ACCENT`) for both `ntfuzz serve` and `ntfuzz view`:
+  - Link the `NTFUZZ` header wordmark to `https://github.com/NimbleTerminal/ntfuzz`
+    while allowing operators to display an HTML-escaped organization/fleet name
+    beside it, optionally linked to a validated `http`/`https` website.
+  - Support a validated `#RRGGBB` accent override via a scoped `--ntfuzz-accent`
+    CSS custom property while preserving contrast, visible `:focus-visible`
+    outlines, responsive truncation on narrow viewports, automatic renderer
+    selection (`renderer: 'auto'`), and removal of the renderer/FPS HUD overlay.
 - Add optional Prometheus-compatible observability (`internal/metrics`) for both
   `ntfuzz serve` and `ntfuzz view` on a dedicated loopback-by-default listener
   (`--metrics` / `--metrics-listen`), isolated from the dashboard listener:
