@@ -289,7 +289,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width
-			m.help.SetWidth(msg.Width - 4)
+			m.help.SetWidth(max(1, msg.Width-4))
 		}
 		if msg.Height > 0 {
 			m.height = msg.Height
@@ -548,7 +548,7 @@ func (m Model) renderHeader() string {
 	if !m.lastUpdated.IsZero() {
 		sub += subtleTextStyle.Render(fmt.Sprintf(" • synced %s", m.lastUpdated.Format("15:04:05")))
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Center, title, sub)
+	return lipgloss.NewStyle().Width(max(1, m.width)).Render(lipgloss.JoinHorizontal(lipgloss.Center, title, sub))
 }
 
 func (m Model) renderOverviewCards() string {
@@ -575,7 +575,22 @@ func (m Model) renderOverviewCards() string {
 	c5 := cardStyle.Render(cardTitleStyle.Render("Projects / Targets") + "\n" +
 		cardValueStyle.Render(fmt.Sprintf("%d / %d", m.status.TotalProjects, m.status.TotalTargets)))
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, c1, c2, c3, c4, c5)
+	cards := []string{c1, c2, c3, c4, c5}
+	var rows []string
+	var row []string
+	width := 0
+	for _, card := range cards {
+		cardWidth := lipgloss.Width(card)
+		if len(row) > 0 && width+cardWidth > m.width {
+			rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, row...))
+			row = nil
+			width = 0
+		}
+		row = append(row, card)
+		width += cardWidth
+	}
+	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, row...))
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
 func (m Model) renderFleetView() string {
@@ -683,7 +698,7 @@ func (m Model) renderFleetView() string {
 		b.WriteString("\n" + statusRunningStyle.Render("Active Jobs: ") + strings.Join(jobs, "  •  ") + "\n")
 	}
 
-	return panelStyle.Width(max(80, m.width-2)).Render(b.String())
+	return panelStyle.Width(max(1, m.width-2)).Render(b.String())
 }
 
 func (m Model) renderDetailView() string {
@@ -739,10 +754,10 @@ func (m Model) renderDetailView() string {
 			)
 		}
 	}
-	crashBox := panelStyle.Width(max(80, m.width-4)).Render(crashB.String())
+	crashBox := panelStyle.Width(max(1, m.width-2)).Render(crashB.String())
 
 	return lipgloss.JoinVertical(lipgloss.Left,
-		panelStyle.Width(max(80, m.width-4)).Render(top.String()),
+		panelStyle.Width(max(1, m.width-2)).Render(top.String()),
 		lipgloss.JoinHorizontal(lipgloss.Top, runsBox, sparkBox),
 		crashBox,
 	)
@@ -754,7 +769,7 @@ func (m Model) renderCrashesView() string {
 
 	if len(m.openCrashes) == 0 {
 		b.WriteString(statusOKStyle.Render("  ✓ Zero open crashes across the fleet.\n"))
-		return panelStyle.Width(max(80, m.width-2)).Render(b.String())
+		return panelStyle.Width(max(1, m.width-2)).Render(b.String())
 	}
 
 	for i, c := range m.openCrashes {
@@ -776,7 +791,7 @@ func (m Model) renderCrashesView() string {
 			b.WriteString(normalRowStyle.Render(line) + "\n")
 		}
 	}
-	return panelStyle.Width(max(80, m.width-2)).Render(b.String())
+	return panelStyle.Width(max(1, m.width-2)).Render(b.String())
 }
 
 func formatRevision(sha string, dirty bool) string {

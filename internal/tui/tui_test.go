@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/NimbleMarkets/go-booba/actions/bubblehelp"
 
 	"github.com/NimbleTerminal/ntfuzz/internal/api"
@@ -170,5 +171,23 @@ func TestBoobaTerminalActionsSnapshot(t *testing.T) {
 	}
 	if actionModel == nil {
 		t.Fatal("expected non-nil action model")
+	}
+}
+
+func TestLayoutTracksWindowWidth(t *testing.T) {
+	m := NewModel(nil, time.Second)
+	for _, width := range []int{130, 74, 60, 163} {
+		next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+		m = next.(Model)
+		for name, view := range map[string]string{
+			"header":  m.renderHeader(),
+			"cards":   m.renderOverviewCards(),
+			"fleet":   m.renderFleetView(),
+			"crashes": m.renderCrashesView(),
+		} {
+			if got := lipgloss.Width(view); got > width {
+				t.Errorf("%s width = %d after resize to %d", name, got, width)
+			}
+		}
 	}
 }
