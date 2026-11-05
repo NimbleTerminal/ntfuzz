@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	dto "github.com/prometheus/client_model/go"
 )
 
 func TestResolveListenAddr(t *testing.T) {
@@ -236,43 +234,4 @@ func TestMetricsServerIsolation(t *testing.T) {
 	if respPost.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 for POST /metrics, got %d", respPost.StatusCode)
 	}
-}
-
-func gatherMetricValue(t *testing.T, m *Metrics, name string, labels map[string]string) float64 {
-	t.Helper()
-	mfs, err := m.Registry().Gather()
-	if err != nil {
-		t.Fatalf("Gather: %v", err)
-	}
-	for _, mf := range mfs {
-		if mf.GetName() != name {
-			continue
-		}
-		for _, metric := range mf.GetMetric() {
-			if matchLabels(metric, labels) {
-				if c := metric.GetCounter(); c != nil {
-					return c.GetValue()
-				}
-				if g := metric.GetGauge(); g != nil {
-					return g.GetValue()
-				}
-				if h := metric.GetHistogram(); h != nil {
-					return float64(h.GetSampleCount())
-				}
-			}
-		}
-	}
-	return 0
-}
-
-func matchLabels(m *dto.Metric, want map[string]string) bool {
-	if len(m.GetLabel()) != len(want) {
-		return false
-	}
-	for _, lp := range m.GetLabel() {
-		if v, ok := want[lp.GetName()]; !ok || v != lp.GetValue() {
-			return false
-		}
-	}
-	return true
 }

@@ -43,7 +43,7 @@ func newViewCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		defer v.Close()
+		defer func() { _ = v.Close() }()
 		done := make(chan struct{})
 		go func() { defer close(done); v.Watch(ctx, interval) }()
 		defer func() { stop(); <-done }()
@@ -62,7 +62,7 @@ func newViewCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 			options.Listener = listener
 		}
 		return booba.ListenAndServe(ctx, v, options)

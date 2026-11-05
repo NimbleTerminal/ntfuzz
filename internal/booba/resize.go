@@ -146,7 +146,7 @@ func (s *metricSession) ResizeWindow(size serve.WindowSize) {
 	if resizer, ok := s.Session.(serve.WindowResizer); ok {
 		resizer.ResizeWindow(size)
 	} else {
-		s.Session.Resize(size.Width, size.Height)
+		s.Resize(size.Width, size.Height)
 	}
 }
 
@@ -163,7 +163,7 @@ func (s *metricSession) Close() error {
 	s.closeOnce.Do(func() {
 		innerAlreadyDone := false
 		select {
-		case <-s.Session.Done():
+		case <-s.Done():
 			innerAlreadyDone = true
 		default:
 		}

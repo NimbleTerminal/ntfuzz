@@ -91,7 +91,7 @@ func (s *Store) PublishSnapshot(ctx context.Context, dir string) (snap Snapshot,
 	if err != nil {
 		return Snapshot{}, err
 	}
-	defer os.Remove(manifest.Name())
+	defer func() { _ = os.Remove(manifest.Name()) }()
 	if _, err = manifest.Write(data); err == nil {
 		err = manifest.Chmod(0644)
 	}
@@ -127,7 +127,7 @@ func (s *Store) copySnapshotLocked(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	var source string
 	if err := conn.QueryRowContext(ctx, "SELECT current_database()").Scan(&source); err != nil {
 		return err

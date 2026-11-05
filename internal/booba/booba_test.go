@@ -81,7 +81,7 @@ func TestReadOnlyTerminalResizesExistingSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	m := metrics.New(metrics.ModeView)
 	handler, err := NewHandler(api.NewSnapshotServer(st, store.Snapshot{PublishedAt: time.Now()}), "", BridgeOptions{
 		ListenAddr:      "127.0.0.1:8081",
@@ -100,7 +100,7 @@ func TestReadOnlyTerminalResizesExistingSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	output := make(chan string, 64)
 	go func() {
 		defer close(output)
@@ -151,7 +151,7 @@ func TestSessionLifecycleBytesAndInternalAPIExemption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	m := metrics.New(metrics.ModeServe)
 	apiSrv := api.NewServer(st, nil)
@@ -175,7 +175,7 @@ func TestSessionLifecycleBytesAndInternalAPIExemption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("websocket.Dial: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	resizePayload, _ := json.Marshal(sip.ResizeMessage{Cols: 100, Rows: 30})
 	if err := conn.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgResize, resizePayload)); err != nil {
@@ -228,7 +228,7 @@ func TestIdleTimeoutAndServerShutdownDisconnectReasons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	// 1. Verify idle_timeout disconnect reason.
 	mIdle := metrics.New(metrics.ModeView)
@@ -254,7 +254,7 @@ func TestIdleTimeoutAndServerShutdownDisconnectReasons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connIdle.CloseNow()
+	defer func() { _ = connIdle.CloseNow() }()
 
 	resizePayload, _ := json.Marshal(sip.ResizeMessage{Cols: 80, Rows: 24})
 	if err := connIdle.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgResize, resizePayload)); err != nil {
@@ -290,7 +290,7 @@ func TestIdleTimeoutAndServerShutdownDisconnectReasons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connShutdown.CloseNow()
+	defer func() { _ = connShutdown.CloseNow() }()
 
 	if err := connShutdown.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgResize, resizePayload)); err != nil {
 		t.Fatal(err)
@@ -313,7 +313,7 @@ func TestRejectedTerminalConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	m := metrics.New(metrics.ModeView)
 	snapSrv := api.NewSnapshotServer(st, store.Snapshot{PublishedAt: time.Now()})
@@ -339,7 +339,7 @@ func TestRejectedTerminalConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn1.CloseNow()
+	defer func() { _ = conn1.CloseNow() }()
 
 	resizePayload, _ := json.Marshal(sip.ResizeMessage{Cols: 80, Rows: 24})
 	if err := conn1.Write(ctx, websocket.MessageBinary, sip.EncodeWSMessage(sip.MsgResize, resizePayload)); err != nil {
@@ -419,7 +419,7 @@ func TestRequestAccountingAndMetricsListenerIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	dashLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -435,9 +435,10 @@ func TestRequestAccountingAndMetricsListenerIsolation(t *testing.T) {
 
 	m := metrics.New(metrics.ModeServe)
 	apiSrv := api.NewServer(st, nil)
-	done := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
-		done <- ListenAndServe(ctx, apiSrv, BridgeOptions{
+		defer close(done)
+		_ = ListenAndServe(ctx, apiSrv, BridgeOptions{
 			ListenAddr:      dashLn.Addr().String(),
 			Listener:        dashLn,
 			RefreshInterval: time.Hour,
@@ -709,7 +710,7 @@ func TestBrandingEquivalentInServeAndView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	branding := Branding{
 		Name:        "Acme Security Fleet",

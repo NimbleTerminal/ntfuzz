@@ -99,7 +99,7 @@ func (v *Viewer) Refresh() (err error) {
 		err = e
 	}
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return err
 	}
 	v.mu.Lock()

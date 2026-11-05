@@ -24,7 +24,7 @@ func TestSnapshotIsolationAndRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	project, err := writer.SyncProject(ctx, store.ProjectSyncInput{Name: "demo' OR 1=1 --", Repo: "https://example.com/demo", SyncedAt: &now, GitSHA: "abc"})
 	if err != nil {
@@ -51,7 +51,7 @@ func TestSnapshotIsolationAndRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer v.Close()
+	defer func() { _ = v.Close() }()
 	live := api.NewServer(writer, nil)
 	for _, path := range []string{"/api/projects", "/api/targets", "/api/runs", "/api/crashes", "/api/coverage/history?target=FuzzParse", "/api/targets?project=demo%27%20OR%201%3D1%20--", "/api/targets?project=%27%20OR%201%3D1%20--", "/api/runs?target=%27%20OR%201%3D1%20--"} {
 		want := httptest.NewRecorder()
@@ -129,7 +129,7 @@ func TestSnapshotPublicationAndViewerRefreshMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	writer.SetMetrics(serveMetrics)
 
 	snapshots := filepath.Join(dir, "snapshots")
@@ -143,7 +143,7 @@ func TestSnapshotPublicationAndViewerRefreshMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer v.Close()
+	defer func() { _ = v.Close() }()
 
 	// Advance fake viewer clock 12.5 seconds past the published snapshot timestamp.
 	viewMetrics.SetClock(func() time.Time {
