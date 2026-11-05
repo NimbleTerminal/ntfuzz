@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -220,6 +221,37 @@ func TestSnapshotHeaderTracksWindowWidth(t *testing.T) {
 		m = next.(Model)
 		if got := lipgloss.Width(m.renderHeader()); got > width {
 			t.Errorf("snapshot header width=%d after resize to %d", got, width)
+		}
+	}
+}
+
+func TestPopulatedFleetResizesWithoutWrappingRows(t *testing.T) {
+	m := NewModelOptions(nil, time.Second, true)
+	m.hideHelp = true
+	for i := 0; i < 14; i++ {
+		m.projects = append(m.projects, api.Project{Name: fmt.Sprintf("project-%02d", i), TargetCount: 5})
+	}
+	for i := 0; i < 70; i++ {
+		m.targets = append(m.targets, api.Target{Name: fmt.Sprintf("FuzzLongParserName%02d", i), ProjectName: "long-project-name", Status: "crash"})
+	}
+	m.selectedIdx = 30
+	for _, width := range []int{160, 100, 60, 40, 120} {
+		m.width, m.height = width, 40
+		fleet := m.renderFleetView()
+		for _, line := range strings.Split(fleet, "\n") {
+			if strings.Contains(line, "FuzzLong") && !strings.Contains(line, "CRASH") {
+				t.Errorf("width %d: target row wrapped away from its status: %s", width, line)
+			}
+		}
+		if !strings.Contains(fleet, "▸") {
+			t.Errorf("width %d: selection disappeared", width)
+		}
+		if got := lipgloss.Width(fleet); got > width {
+			t.Errorf("width %d: fleet width %d", width, got)
+		}
+		view := m.View().Content
+		if got := lipgloss.Height(view); got > m.height {
+			t.Errorf("width %d: full view height %d exceeds %d", width, got, m.height)
 		}
 	}
 }

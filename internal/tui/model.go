@@ -15,6 +15,7 @@ import (
 	"github.com/NimbleMarkets/go-booba/actions"
 	"github.com/NimbleMarkets/go-booba/actions/bubblehelp"
 	"github.com/NimbleMarkets/ntcharts/v2/sparkline"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/NimbleTerminal/ntfuzz/internal/api"
 )
@@ -640,12 +641,60 @@ func (m Model) renderFleetView() string {
 			filterTabs = append(filterTabs, subtleTextStyle.Render("["+lbl+"]"))
 		}
 	}
-	b.WriteString("Filter: " + strings.Join(filterTabs, "  ") + "\n\n")
+	filter := "Filter: " + strings.Join(filterTabs, "  ")
+	contentWidth := max(1, m.width-6)
+	if lipgloss.Width(filter) > contentWidth {
+		label := "All Projects"
+		if m.projectIdx > 0 && m.projectIdx <= len(m.projects) {
+			label = m.projects[m.projectIdx-1].Name
+		}
+		filter = "Filter: " + label + "  (p/tab to cycle)"
+	}
+	b.WriteString(lipgloss.NewStyle().MaxWidth(contentWidth).Render(filter) + "\n\n")
 
-	// Targets Table Header
-	hdr := fmt.Sprintf("  %-8s  %-15s  %-20s  %-10s  %-10s  %-9s  %-6s  %-7s  %-9s  %-6s",
-		"STATUS", "PROJECT", "TARGET", "REVISION", "LAST RUN", "EXECS/SEC", "CORP", "COV %", "TREND", "CRASH")
-	b.WriteString(headerRowStyle.Render(hdr) + "\n")
+	// Keep each target on one terminal row. Extra metrics become visible as
+	// the terminal grows; target detail retains every field at any width.
+	type column struct {
+		title string
+		width int
+	}
+	columns := []column{{"STATUS", 7}, {"TARGET", 12}, {"CRASH", 5}}
+	if contentWidth >= 60 {
+		columns = append(columns[:1], append([]column{{"PROJECT", 14}}, columns[1:]...)...)
+	}
+	if contentWidth >= 75 {
+		columns = append(columns, column{"EXECS/SEC", 9})
+	}
+	if contentWidth >= 95 {
+		columns = append(columns, column{"LAST RUN", 10}, column{"COV %", 7})
+	}
+	if contentWidth >= 120 {
+		columns = append(columns, column{"REVISION", 10}, column{"CORP", 6})
+	}
+	if contentWidth >= 140 {
+		columns = append(columns, column{"TREND", 9})
+	}
+	used := 2 + 2*(len(columns)-1)
+	for _, c := range columns {
+		used += c.width
+	}
+	for i := range columns {
+		if columns[i].title == "TARGET" {
+			columns[i].width = max(1, columns[i].width+contentWidth-used)
+		}
+	}
+	renderCells := func(values map[string]string) string {
+		cells := make([]string, len(columns))
+		for i, c := range columns {
+			cells[i] = lipgloss.NewStyle().Width(c.width).MaxWidth(c.width).Render(ansi.Truncate(values[c.title], c.width, "…"))
+		}
+		return strings.Join(cells, "  ")
+	}
+	labels := map[string]string{}
+	for _, c := range columns {
+		labels[c.title] = c.title
+	}
+	b.WriteString(headerRowStyle.Render("  "+renderCells(labels)) + "\n")
 
 	if len(m.targets) == 0 {
 		if m.loading {
@@ -659,7 +708,23 @@ func (m Model) renderFleetView() string {
 			activeMap[job.Project+"/"+job.Target] = true
 		}
 
-		maxRows := max(6, m.height-16)
+		reserved := lipgloss.Height(m.renderHeader()) + lipgloss.Height(m.renderOverviewCards()) + 2
+		if !m.hideHelp {
+			reserved += 1 + lipgloss.Height(m.help.View(m.keyMap()))
+		}
+		if m.lastErr != nil {
+			reserved++
+		}
+		for _, p := range m.projects {
+			if p.SyncError != "" {
+				reserved++
+			}
+		}
+		// Filter (two lines), table heading and underline, panel borders.
+		maxRows := max(1, m.height-reserved-6)
+		if len(m.status.ActiveJobs) > 0 {
+			maxRows = max(1, maxRows-3)
+		}
 		start := 0
 		if m.selectedIdx >= maxRows {
 			start = m.selectedIdx - maxRows + 1
@@ -688,19 +753,12 @@ func (m Model) renderFleetView() string {
 			trend := RenderCoverageTrend(t.CoverageTrend, 8)
 			rev := formatRevision(t.GitSHA, t.Dirty)
 
-			rowStr := fmt.Sprintf("%s%-8s  %-15s  %-20s  %-10s  %-10s  %-9s  %6d  %6.1f%%  %-9s  %s",
-				cursor,
-				badge,
-				truncate(t.ProjectName, 15),
-				truncate(t.Name, 20),
-				truncate(rev, 10),
-				lastRun,
-				FormatExecRate(t.ExecsPerSec),
-				t.CorpusCount,
-				t.CoveragePct,
-				trend,
-				crashCell,
-			)
+			rowStr := cursor + renderCells(map[string]string{
+				"STATUS": badge, "PROJECT": t.ProjectName, "TARGET": t.Name,
+				"REVISION": rev, "LAST RUN": lastRun, "EXECS/SEC": FormatExecRate(t.ExecsPerSec),
+				"CORP": strconv.Itoa(t.CorpusCount), "COV %": fmt.Sprintf("%.1f%%", t.CoveragePct),
+				"TREND": trend, "CRASH": crashCell,
+			})
 			if i == m.selectedIdx {
 				b.WriteString(selectedRowStyle.Render(rowStr) + "\n")
 			} else {
