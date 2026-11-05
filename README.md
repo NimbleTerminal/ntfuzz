@@ -1,6 +1,14 @@
-# ntfuzz
+# ntfuzz — Continuous Go Fuzzing Orchestrator and Dashboard
 
-`ntfuzz` is a single-binary continuous fuzzing orchestrator for Go repositories, backed by **DuckDB** (`duckdb-go/v2`) and a **Bubble Tea v2** TUI dashboard served both natively in your terminal and in the browser via **Booba** (`go-booba` + Ghostty/`ntwebterm`).
+<p>
+    <a href="https://github.com/NimbleTerminal/ntfuzz/tags"><img src="https://img.shields.io/github/tag/NimbleTerminal/ntfuzz.svg" alt="Latest Release"></a>
+    <a href="https://pkg.go.dev/nimbleterminal.dev/ntfuzz"><img src="https://pkg.go.dev/badge/nimbleterminal.dev/ntfuzz.svg" alt="Go Reference"></a>
+    <a href="https://github.com/NimbleTerminal/ntfuzz/actions/workflows/ci.yml"><img src="https://github.com/NimbleTerminal/ntfuzz/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+    <a href="./CODE_OF_CONDUCT.md"><img src="https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg" alt="Code Of Conduct"></a>
+</p>
+
+`ntfuzz` (`nimbleterminal.dev/ntfuzz`) is a single-binary continuous fuzzing orchestrator for Go repositories, backed by **DuckDB** ([`duckdb-go/v2`](https://github.com/duckdb/duckdb-go) and [`ntduckbox`](https://github.com/NimbleTerminal/ntduckbox)) and a **[Bubble Tea v2](https://github.com/charmbracelet/bubbletea)** TUI dashboard served both natively in your terminal and in the browser via **Booba** (`go-booba` + Ghostty/[`ntwebterm`](https://github.com/NimbleTerminal/ntwebterm)).
 
 ---
 
@@ -289,4 +297,27 @@ scrape_configs:
 
 - **`ntfuzz` service metrics (`/metrics`)** measure origin-level process health: HTTP requests reaching the Go server, WebSocket terminal session concurrency, connection rejections (`connection_limit`, `origin`, `handshake`), session durations and disconnect causes (`client_disconnect`, `idle_timeout`, `server_shutdown`), PTY terminal byte throughput, and DuckDB snapshot publication/refresh latency and staleness.
 - **CDN / reverse-proxy analytics** (such as edge CDN or ingress logs configured in deployment infrastructure) measure edge traffic before it reaches `ntfuzz`: CDN cache hits on static assets, WAF/rate-limit blocks at the edge, TLS handshake versions, geographic/ASN distributions, and unique visitor estimates. Keep CDN configuration, collectors, dashboards, and retention policies in deployment infrastructure rather than inside `ntfuzz`.
+
+---
+
+## Open Collaboration
+
+Contributions and feedback are welcome. Please adhere to our [Code of Conduct](./CODE_OF_CONDUCT.md) when engaging our community.
+
+- [GitHub Issues](https://github.com/NimbleTerminal/ntfuzz/issues)
+- [GitHub Pull Requests](https://github.com/NimbleTerminal/ntfuzz/pulls)
+
+## Acknowledgements
+
+Thanks to [DuckDB](https://duckdb.org/) and [`duckdb-go`](https://github.com/duckdb/duckdb-go), [Charm](https://charm.land) for [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Gloss](https://github.com/charmbracelet/lipgloss), [Ghostty](https://ghostty.org/), and the [`ntwebterm`](https://github.com/NimbleTerminal/ntwebterm), [`ntduckbox`](https://github.com/NimbleTerminal/ntduckbox), and [`ntcharts`](https://github.com/NimbleMarkets/ntcharts) libraries.
+
+## License
+
+Released under the [MIT License](./LICENSE). Part of the [Nimble Terminal](https://nimbleterminal.com) platform.
+
+Copyright (c) 2026 [Neomantra Corp](https://www.neomantra.com).
+
+----
+Made with :heart: and :fire: by the team behind [Nimble Terminal](https://nimbleterminal.com).
+
 
