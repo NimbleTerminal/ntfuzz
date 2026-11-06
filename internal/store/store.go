@@ -15,7 +15,7 @@ import (
 )
 
 // CurrentSchemaVersion tracks the DuckDB schema version.
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 // ErrNotFound is returned when a requested record does not exist.
 var ErrNotFound = errors.New("record not found")
@@ -94,6 +94,7 @@ type Target struct {
 
 // Run represents a single execution of a fuzz target tied to a code revision.
 type Run struct {
+	Diagnostic     string    `json:"diagnostic,omitempty"`
 	ID             int64     `json:"id"`
 	TargetID       int64     `json:"target_id"`
 	ProjectName    string    `json:"project_name,omitempty"`
@@ -148,6 +149,7 @@ type CoveragePoint struct {
 
 // FleetStats summarizes overall store statistics for /api/status.
 type FleetStats struct {
+	FailedTargets int     `json:"failed_targets"`
 	TotalProjects int     `json:"total_projects"`
 	TotalTargets  int     `json:"total_targets"`
 	OpenCrashes   int     `json:"open_crashes"`
@@ -313,6 +315,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		},
 	}
 
+	migrations = append(migrations, migration{version: 3, stmts: []string{`ALTER TABLE runs ADD COLUMN IF NOT EXISTS diagnostic VARCHAR DEFAULT '';`}})
 	now := time.Now().UTC()
 	for _, m := range migrations {
 		if m.version <= currentVersion {
@@ -586,11 +589,11 @@ func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 		`INSERT INTO runs (
 			target_id, started, duration_sec, execs, execs_per_sec,
 			new_interesting, corpus_count, crashes, coverage_pct, status, worker,
-			git_sha, dirty, go_version
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+			git_sha, dirty, go_version, diagnostic
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		r.TargetID, started, r.DurationSec, r.Execs, r.ExecsPerSec,
 		r.NewInteresting, r.CorpusCount, r.Crashes, r.CoveragePct, r.Status, r.Worker,
-		r.GitSHA, r.Dirty, r.GoVersion,
+		r.GitSHA, r.Dirty, r.GoVersion, r.Diagnostic,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert run for target %d: %w", r.TargetID, err)
@@ -760,7 +763,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 			MAX(v.last_started) AS last_run_at,
 			COALESCE(AVG(CASE WHEN v.execs_per_sec > 0 THEN v.execs_per_sec END), 0.0) AS avg_execs_per_sec,
 			COALESCE(AVG(CASE WHEN v.coverage_pct > 0 THEN v.coverage_pct END), 0.0) AS avg_coverage_pct,
-			COALESCE(SUM(CASE WHEN v.status = 'error' OR v.status = 'crash' THEN 1 ELSE 0 END), 0) AS err_targets,
+			COALESCE(SUM(CASE WHEN v.status NOT IN ('ok', 'pending') THEN 1 ELSE 0 END), 0) AS err_targets,
 			COALESCE(SUM(CASE WHEN v.status = 'ok' THEN 1 ELSE 0 END), 0) AS ok_targets
 		FROM projects p
 		LEFT JOIN latest_target_status v ON v.project_id = p.id
@@ -893,7 +896,7 @@ func (s *Store) ListRuns(ctx context.Context, targetFilter string, limit int) ([
 			r.id, r.target_id, p.name AS project_name, t.package, t.name AS target_name,
 			r.started, r.duration_sec, r.execs, r.execs_per_sec,
 			r.new_interesting, COALESCE(r.corpus_count, 0), r.crashes, r.coverage_pct, r.status, r.worker,
-			COALESCE(r.git_sha, ''), COALESCE(r.dirty, FALSE), COALESCE(r.go_version, '')
+			COALESCE(r.git_sha, ''), COALESCE(r.dirty, FALSE), COALESCE(r.go_version, ''), COALESCE(r.diagnostic, '')
 		FROM runs r
 		JOIN targets t ON t.id = r.target_id
 		JOIN projects p ON p.id = t.project_id
@@ -918,7 +921,7 @@ func (s *Store) ListRuns(ctx context.Context, targetFilter string, limit int) ([
 			&r.ID, &r.TargetID, &r.ProjectName, &r.Package, &r.TargetName,
 			&r.Started, &r.DurationSec, &r.Execs, &r.ExecsPerSec,
 			&r.NewInteresting, &r.CorpusCount, &r.Crashes, &r.CoveragePct, &r.Status, &r.Worker,
-			&r.GitSHA, &r.Dirty, &r.GoVersion,
+			&r.GitSHA, &r.Dirty, &r.GoVersion, &r.Diagnostic,
 		); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}
@@ -1070,6 +1073,9 @@ func (s *Store) GetFleetStats(ctx context.Context) (FleetStats, error) {
 		`SELECT COUNT(*), COALESCE(SUM(execs), 0), COALESCE(AVG(CASE WHEN execs_per_sec > 0 THEN execs_per_sec END), 0.0) FROM runs WHERE started >= ?`,
 		since,
 	).Scan(&stats.RunsLast24h, &stats.ExecsLast24h, &stats.AvgExecsSec); err != nil {
+		return stats, err
+	}
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM latest_target_status WHERE status NOT IN ('ok', 'pending')`).Scan(&stats.FailedTargets); err != nil {
 		return stats, err
 	}
 	stats.SchemaVersion, _ = s.schemaVersionLocked(ctx)

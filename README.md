@@ -321,3 +321,69 @@ Copyright (c) 2026 [Neomantra Corp](https://www.neomantra.com).
 Made with :heart: and :fire: by the team behind [Nimble Terminal](https://nimbleterminal.com).
 
 
+
+### Runner outcomes and diagnostics
+
+Package selection precedes all test flags: `go test ./subpackage -parallel=1
+-run=^FuzzName$ -fuzz=^FuzzName$ -fuzztime=3s -test.fuzzcachedir=PATH`.
+The coverage replay command uses the same package-first convention. Other
+subprocesses are Git checkout/revision commands and `go env GOVERSION`; none
+forward test-binary flags.
+
+New runs report `ok` only after coordinator execution progress and a standalone
+`PASS` with a successful exit. Zero reported executions can still be valid when
+the coordinator reports progress; a positive mutation count is not the sole
+success criterion. `missing_target` identifies Go's no-target/no-test warning,
+`incomplete` identifies clean exits without completed fuzzing evidence (including
+seed-only runs), `canceled` identifies interrupted jobs, `error` covers build,
+startup, and runner timeout failures, and `crash` requires fuzz failure evidence.
+Unknown output formats fail closed as incomplete. Shutdown cancellations are
+recorded with a short independent persistence timeout when possible.
+
+Failed runs expose `diagnostic` in `GET /api/runs?target=TARGET_ID&limit=2`.
+The target detail TUI displays the selected run's last 12 diagnostic lines.
+Capture retains approximately 16 KiB of beginning/end output, even for noisy
+targets; successful runs do not retain output. Local repository, corpus, and
+home paths, URL credentials, and common labeled secrets are redacted; terminal
+control characters are removed. This is best-effort redaction, **not a guarantee
+against arbitrary secrets printed by target code**. Run only projects whose
+diagnostic output is suitable for the audience of the API. Public snapshots
+include these diagnostics. Existing crash stacks and historical rows retain
+their existing contents and retention policy; this update does not rewrite them.
+
+Schema v3 adds nullable/default-empty run diagnostics. Writer migration is
+automatic; viewers require a matching v3 snapshot. Upgrade the writer and viewer
+together and publish a new snapshot before starting the new viewer. Old viewers
+cannot refresh to v3 snapshots.
+
+### Deploying the subpackage runner repair (operator procedure)
+
+This repair does not itself deploy or release anything.
+
+1. Run `task ci` and `NTFUZZ_E2E=1 task test-e2e`. Optionally run
+   `NTFUZZ_PROJECTS=/path/to/projects go test -v ./internal/orchestrator -run TestLocalRunnerRepresentativeProjects -count=1`
+   for disposable-copy, three-second Gloss, nthtml, and nttypeset campaigns.
+2. Stop the writer cleanly and back up its closed DuckDB database, corpus tree,
+   configuration, and current snapshot generation. Keep the previous binary.
+3. Install the reviewed binary for both writer and viewer. Start the writer with
+   its existing configuration and database; verify schema v3 and successful
+   publication, then restart the viewer against the new snapshot directory.
+   Use the service manager and paths configured on the host.
+4. Check `/api/status`, `/api/projects`, and `/api/targets`. Wait for **fresh**
+   runs of Gloss `FuzzReadText` (also review all 18 Gloss targets) and nthtml
+   subpackage targets. Query `/api/runs?target=TARGET_ID&limit=2` and require
+   timestamps after deployment, the deployed project revision, `status=ok`,
+   and real execution evidence/counts. A historical green row or a stale snapshot
+   is not acceptance. Check the root-package nttypeset control as well.
+5. Inspect new errors via run diagnostics and compare
+   `/api/crashes?open=true` with the pre-deployment inventory. Do not mark
+   historical failures or crashes fixed based on this runner repair. The reported
+   11 ntcanvas and 2 ntcharts3d open crashes require separate investigation.
+6. If rollback is necessary, stop the writer and restore the backed-up database
+   and matching snapshot/binaries together; do not point an old viewer at v3
+   snapshots. Preserve new run/crash evidence before restoring.
+
+Local short campaigns validate selection and execution, not long-term target
+correctness or the production deployment. Truncated diagnostics can omit evidence;
+such runs may conservatively appear incomplete. Post-deployment confirmation is
+still required.

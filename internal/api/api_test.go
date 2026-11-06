@@ -46,6 +46,7 @@ func TestAPIServerAndClient(t *testing.T) {
 		t.Fatalf("UpsertTarget: %v", err)
 	}
 	_, err = st.InsertRun(ctx, store.Run{
+		Diagnostic:     "bounded failure detail",
 		TargetID:       tID,
 		Started:        now,
 		DurationSec:    4.2,
@@ -135,7 +136,7 @@ func TestAPIServerAndClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRuns: %v", err)
 	}
-	if len(runs) != 1 || runs[0].Execs != 84000 || runs[0].GitSHA != "a1b2c3d4e5f6" {
+	if len(runs) != 1 || runs[0].Diagnostic != "bounded failure detail" || runs[0].Execs != 84000 || runs[0].GitSHA != "a1b2c3d4e5f6" {
 		t.Fatalf("unexpected runs: %+v", runs)
 	}
 

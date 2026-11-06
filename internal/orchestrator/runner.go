@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -70,7 +71,7 @@ func NewLocalRunner() *LocalRunner {
 
 var (
 	// Matches: fuzz: elapsed: 3s, execs: 145203 (48392/sec), new interesting: 4 (total: 16)
-	reFuzzProgress = regexp.MustCompile(`execs:\s*(\d+)\s*\((\d+(?:\.\d+)?)/sec\)(?:,\s*new interesting:\s*(\d+))?(?:\s*\(total:\s*(\d+)\))?`)
+	reFuzzProgress = regexp.MustCompile(`(?m)^fuzz: elapsed: [^\n]*execs:\s*(\d+)\s*\((\d+(?:\.\d+)?)/sec\)(?:,\s*new interesting:\s*(\d+))?(?:\s*\(total:\s*(\d+)\))?`)
 	// Matches: Failing input written to testdata/fuzz/FuzzFoo/1234abcd...
 	reFailingInput = regexp.MustCompile(`Failing input written to\s+(\S+)`)
 	// Matches: coverage: 76.5% of statements
@@ -87,7 +88,7 @@ var (
 // temporary copy of the module.
 func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, error) {
 	if err := ctx.Err(); err != nil {
-		return JobResult{}, err
+		return JobResult{Status: "canceled"}, err
 	}
 
 	started := time.Now().UTC()
@@ -119,12 +120,12 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 	exactPattern := fmt.Sprintf("^%s$", regexp.QuoteMeta(job.TargetName))
 	args := []string{
 		"test",
+		pkgArg, // Package selection must precede forwarded test-binary flags.
 		"-parallel=1",
 		"-run=" + exactPattern,
 		"-fuzz=" + exactPattern,
 		"-fuzztime=" + fuzzTime.String(),
 		"-test.fuzzcachedir=" + targetCacheRoot,
-		pkgArg,
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, fuzzTime+45*time.Second)
@@ -138,15 +139,31 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 	}
 	cmd.WaitDelay = 5 * time.Second
 
-	outBytes, runErr := cmd.CombinedOutput()
+	var captured boundedOutput
+	cmd.Stdout = &captured
+	cmd.Stderr = &captured
+	runErr := cmd.Run()
+	outBytes := []byte(captured.String())
 	if err := ctx.Err(); err != nil {
-		return JobResult{Started: started, Output: string(outBytes)}, err
+		res := ParseFuzzOutput(string(outBytes), started, time.Since(started).Seconds(), err)
+		res.Output = sanitizeDiagnostic(res.Output, job.RepoDir, absCorpusRoot)
+		return res, err
 	}
 
 	duration := time.Since(started).Seconds()
 	output := string(outBytes)
 
+	if runCtx.Err() != nil {
+		runErr = runCtx.Err()
+	}
 	res := ParseFuzzOutput(output, started, duration, runErr)
+	if runErr != nil {
+		res.Output += "\nrunner: " + runErr.Error()
+	}
+	res.Output = sanitizeDiagnostic(res.Output, job.RepoDir, absCorpusRoot)
+	if res.Status == "ok" {
+		res.Output = ""
+	}
 
 	// Persist crash artifacts into the corpus tree and hash their actual bytes
 	pkgDir := job.RepoDir
@@ -175,7 +192,7 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 	}
 
 	// Measure statement coverage across f.Add seeds + testdata/fuzz + cached corpus entries in an isolated temp copy
-	if !res.CoverageMeasured && ctx.Err() == nil {
+	if !res.CoverageMeasured && ctx.Err() == nil && res.Status == "ok" {
 		if cov, measured, covErr := measureCorpusCoverage(ctx, job.RepoDir, pkgArg, exactPattern, job.TargetName, cacheTargetDir); covErr == nil && measured {
 			res.CoveragePct = cov
 			res.CoverageMeasured = true
@@ -221,7 +238,7 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 	res := JobResult{
 		Started:     started,
 		DurationSec: durationSec,
-		Status:      "ok",
+		Status:      "incomplete",
 		Output:      output,
 	}
 
@@ -274,6 +291,22 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 		res.ExecsPerSec = lastRate
 	}
 
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		res.Status = "canceled"
+		if errors.Is(runErr, context.DeadlineExceeded) {
+			res.Status = "error"
+		}
+		res.CrashRecords = nil
+		return res
+	}
+	if strings.Contains(output, "no fuzz tests to fuzz") || strings.Contains(output, "[no test files]") || strings.Contains(output, "no tests to run") {
+		res.Status = "missing_target"
+		res.CrashRecords = nil
+		return res
+	}
+	if runErr == nil && reFuzzProgress.MatchString(output) && regexp.MustCompile(`(?m)^PASS\r?$`).MatchString(output) {
+		res.Status = "ok"
+	}
 	if len(res.CrashRecords) > 0 {
 		res.Crashes = len(res.CrashRecords)
 		res.Status = "crash"
@@ -281,7 +314,7 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 	}
 
 	if runErr != nil {
-		if strings.Contains(output, "--- FAIL:") || strings.Contains(output, "panic:") || strings.Contains(output, "fuzzing process hung or terminated unexpectedly") {
+		if regexp.MustCompile(`(?m)^--- FAIL: Fuzz\w+`).MatchString(output) && !strings.Contains(output, "failed to start") && !strings.Contains(output, "resource temporarily unavailable") && !strings.Contains(output, "failed to unmarshal") && !strings.Contains(output, "mismatched types in corpus entry") {
 			stack := extractCrashStack(output)
 			fp := FingerprintStack(stack)
 			sum := sha256.Sum256([]byte(stack))
@@ -398,11 +431,10 @@ func measureCorpusCoverage(ctx context.Context, moduleDir, pkgArg, exactPattern,
 	covCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(covCtx, "go", "test",
+	cmd := exec.CommandContext(covCtx, "go", "test", pkgArg,
 		"-parallel=1",
 		"-run="+exactPattern,
 		"-cover",
-		pkgArg,
 	)
 	cmd.Dir = tmpModDir
 	cmd.Env = append(os.Environ(), "GOMAXPROCS=1")
@@ -522,4 +554,54 @@ func extractCrashStack(output string) string {
 func sanitizePathSegment(s string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
 	return replacer.Replace(s)
+}
+
+// boundedOutput retains the beginning and end, bounding memory even for noisy targets.
+// os/exec serializes writes when Stdout and Stderr share this writer.
+type boundedOutput struct{ head, tail []byte }
+
+func (b *boundedOutput) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(b.head) < 8192 {
+		k := min(8192-len(b.head), len(p))
+		b.head = append(b.head, p[:k]...)
+		p = p[k:]
+	}
+	if len(p) > 8192 {
+		p = p[len(p)-8192:]
+	}
+	b.tail = append(b.tail, p...)
+	if len(b.tail) > 8192 {
+		b.tail = append([]byte(nil), b.tail[len(b.tail)-8192:]...)
+	}
+	return n, nil
+}
+func (b *boundedOutput) String() string {
+	return string(b.head) + "\n[diagnostic tail]\n" + string(b.tail)
+}
+
+var diagnosticSecret = regexp.MustCompile(`(?i)(token|password|secret|authorization|api[_-]?key)([=: ]+)[^\s]+`)
+var diagnosticURL = regexp.MustCompile(`(https?://)[^/\s@]+@`)
+
+func sanitizeDiagnostic(s string, paths ...string) string {
+	for _, path := range paths {
+		if path != "" {
+			s = strings.ReplaceAll(s, path, "<path>")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		s = strings.ReplaceAll(s, home, "<home>")
+	}
+	s = diagnosticURL.ReplaceAllString(s, "${1}<redacted>@")
+	s = diagnosticSecret.ReplaceAllString(s, "${1}${2}<redacted>")
+	s = strings.Map(func(r rune) rune {
+		if r < 32 && r != '\n' && r != '\t' || r == 127 {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > 16384 {
+		s = s[:8192] + "\n[truncated]\n" + s[len(s)-8192:]
+	}
+	return strings.ToValidUTF8(s, "")
 }

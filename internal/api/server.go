@@ -233,6 +233,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case stats.OpenCrashes > 0:
 		health = "crashes_detected"
+	case stats.FailedTargets > 0:
+		health = "error"
 	case stats.TotalTargets == 0 && len(activeJobs) == 0:
 		health = "idle"
 	case len(activeJobs) > 0:

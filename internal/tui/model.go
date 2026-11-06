@@ -813,6 +813,15 @@ func (m Model) renderDetailView() string {
 		cardTitleStyle.Render(fmt.Sprintf("Recent Runs (%d)", len(m.detailRuns))) + "\n" + m.runsTable.View(),
 	)
 
+	if idx := m.runsTable.Cursor(); idx >= 0 && idx < len(m.detailRuns) {
+		if d := m.detailRuns[idx].Diagnostic; d != "" {
+			lines := strings.Split(d, "\n")
+			if len(lines) > 12 {
+				lines = lines[len(lines)-12:]
+			}
+			runsBox += "\n" + panelStyle.Width(max(1, m.width-2)).Render("Selected run diagnostic (full text: /api/runs)\n"+strings.Join(lines, "\n"))
+		}
+	}
 	var crashB strings.Builder
 	crashB.WriteString(cardTitleStyle.Render(fmt.Sprintf("Open Crashes (%d)", len(m.detailCrashes))) + "\n")
 	if len(m.detailCrashes) == 0 {

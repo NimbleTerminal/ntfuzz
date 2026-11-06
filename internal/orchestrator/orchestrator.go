@@ -405,7 +405,17 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 
 	res, err := o.runner.RunTarget(ctx, job)
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return
+		res.Status = "canceled"
+		res.Crashes, res.CrashRecords = 0, nil
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+	}
+	if err != nil {
+		if res.Status == "" {
+			res.Status = "error"
+		}
+		res.Output = sanitizeDiagnostic(res.Output+"\nrunner: "+err.Error(), job.RepoDir, job.CorpusDir)
 	}
 	if err != nil {
 		o.logger.Warn("runner error",
@@ -420,6 +430,7 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 	o.recordTargetActivity(item.targetID, res.NewInteresting, res.Crashes)
 
 	_, storeErr := o.store.InsertRun(ctx, store.Run{
+		Diagnostic:     res.Output,
 		TargetID:       item.targetID,
 		Started:        res.Started,
 		DurationSec:    res.DurationSec,

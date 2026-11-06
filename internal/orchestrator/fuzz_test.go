@@ -110,7 +110,7 @@ func FuzzParseFuzzOutput(f *testing.F) {
 		res := ParseFuzzOutput(output, started, durationSec, runErr)
 
 		switch res.Status {
-		case "ok", "crash", "error":
+		case "ok", "crash", "error", "missing_target", "incomplete", "canceled":
 		default:
 			t.Fatalf("unexpected status %q", res.Status)
 		}

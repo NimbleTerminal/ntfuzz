@@ -103,6 +103,7 @@ func TargetFromStore(t store.Target) Target {
 
 // Run is the JSON wire representation of a completed fuzz run.
 type Run struct {
+	Diagnostic     string    `json:"diagnostic,omitempty"`
 	ID             int64     `json:"id"`
 	TargetID       int64     `json:"target_id"`
 	ProjectName    string    `json:"project_name,omitempty"`
@@ -126,6 +127,7 @@ type Run struct {
 // RunFromStore converts a store.Run into an API Run DTO.
 func RunFromStore(r store.Run) Run {
 	return Run{
+		Diagnostic:     r.Diagnostic,
 		ID:             r.ID,
 		TargetID:       r.TargetID,
 		ProjectName:    r.ProjectName,

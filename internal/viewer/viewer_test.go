@@ -34,7 +34,7 @@ func TestSnapshotIsolationAndRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = writer.InsertRun(ctx, store.Run{TargetID: target, Started: now, DurationSec: 1, Execs: 123, ExecsPerSec: 123, NewInteresting: 2, CorpusCount: 3, CoveragePct: 45.6, Status: "ok", Worker: "local-1", GitSHA: "abc"})
+	_, err = writer.InsertRun(ctx, store.Run{Diagnostic: "snapshot diagnostic", TargetID: target, Started: now, DurationSec: 1, Execs: 123, ExecsPerSec: 123, NewInteresting: 2, CorpusCount: 3, CoveragePct: 45.6, Status: "ok", Worker: "local-1", GitSHA: "abc"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,5 +1,13 @@
 # `ntfuzz` CHANGELOG
 
+## [Unreleased]
+
+- Fix subpackage fuzz selection by placing the package before forwarded test flags; apply package-first ordering to coverage replay.
+- Require fuzz coordinator progress and PASS before reporting success; distinguish missing targets, incomplete runs, cancellation, infrastructure errors, and fuzz crashes.
+- Bound failed-run diagnostics, redact common sensitive values, persist them in schema v3, and expose them in the runs API and target-detail TUI, including snapshots.
+- Add always-on live subprocess regressions for subpackages with and without root Go files, cache delivery, outcome classification, and optional representative project campaigns.
+- Document coordinated writer/viewer upgrade and fresh-run acceptance. Historical records and open crashes are unchanged.
+
 ## [0.1.0] - 2026-11-05
 
 ### Added

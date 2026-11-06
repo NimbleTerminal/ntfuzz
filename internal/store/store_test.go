@@ -252,3 +252,33 @@ func TestStorePruneOldRuns(t *testing.T) {
 		t.Fatalf("expected 3 runs remaining (keepPerTarget=3), got %d", len(remaining))
 	}
 }
+
+func TestIncompleteRunIsNotHealthy(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	p, err := st.UpsertProject(ctx, "fixture", "local", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := st.UpsertTarget(ctx, p, "fixture/sub", "FuzzSub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"missing_target", "incomplete", "canceled", "error"} {
+		if _, err := st.InsertRun(ctx, Run{TargetID: target, Status: status, Diagnostic: "detail"}); err != nil {
+			t.Fatal(err)
+		}
+		stats, err := st.GetFleetStats(ctx)
+		if err != nil || stats.FailedTargets != 1 {
+			t.Fatalf("stats=%+v err=%v", stats, err)
+		}
+		projects, err := st.ListProjects(ctx)
+		if err != nil || len(projects) != 1 || projects[0].LatestStatus != "error" {
+			t.Fatalf("projects=%+v err=%v", projects, err)
+		}
+	}
+}

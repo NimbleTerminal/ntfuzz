@@ -115,6 +115,12 @@ func RenderStatusBadge(status string, isRunning bool) string {
 		return statusOKStyle.Render("● OK   ")
 	case "crash", "crashes_detected", "fail":
 		return statusCrashStyle.Render("✖ CRASH")
+	case "missing_target":
+		return statusWarnStyle.Render("! MISSING")
+	case "incomplete":
+		return statusWarnStyle.Render("! INCOMPLETE")
+	case "canceled":
+		return statusWarnStyle.Render("! CANCELED")
 	case "error":
 		return statusWarnStyle.Render("! ERROR")
 	case "fuzzing", "running":

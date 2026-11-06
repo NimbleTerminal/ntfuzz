@@ -255,3 +255,15 @@ func TestPopulatedFleetResizesWithoutWrappingRows(t *testing.T) {
 		}
 	}
 }
+
+func TestRunDiagnosticView(t *testing.T) {
+	m := NewModel(nil, time.Second)
+	m.width = 120
+	m.detailTarget = &api.Target{ID: 1, Name: "FuzzSub", Status: "missing_target"}
+	m.detailRuns = []api.Run{{Status: "missing_target", Diagnostic: "no fuzz tests to fuzz"}}
+	m.syncDetailWidgets()
+	view := m.renderDetailView()
+	if !strings.Contains(view, "no fuzz tests to fuzz") || !strings.Contains(view, "MISSING") {
+		t.Fatal(view)
+	}
+}
