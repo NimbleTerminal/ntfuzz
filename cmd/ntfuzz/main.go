@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	booba "github.com/NimbleMarkets/go-booba"
 	"github.com/spf13/cobra"
+	booba "nimbleterminal.dev/booba"
 
 	"nimbleterminal.dev/ntfuzz/internal/api"
 	boobabridge "nimbleterminal.dev/ntfuzz/internal/booba"

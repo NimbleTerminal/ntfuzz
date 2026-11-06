@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Migrate from the archived `github.com/NimbleMarkets/go-booba` v0.11.0 to `nimbleterminal.dev/booba` v0.12.1, which bundles ntwebterm 0.4.2 and its browser text-selection fixes (wrapped-line copy, wide-character word selection, listener cleanup).
 - Snapshot viewer TUI: the Fleet Status card now reflects the published data (CRASH when open crashes exist, otherwise OK) instead of a misleading PEND badge, and the always-zero Active Workers card is replaced by a Snapshot Age card in read-only mode.
 - Fix bounded diagnostic capture: small outputs are kept verbatim and the omission marker is only inserted on line boundaries, so `PASS` and `--- FAIL` lines are never split.
 - Classify crashes correctly when target output contains coordinator phrases such as "failed to unmarshal" or "no tests to run"; infrastructure and missing-target detection are anchored on Go's own lines.

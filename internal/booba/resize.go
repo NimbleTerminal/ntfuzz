@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/NimbleMarkets/go-booba/serve"
+	"nimbleterminal.dev/booba/serve"
 
 	"nimbleterminal.dev/ntfuzz/internal/metrics"
 )

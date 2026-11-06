@@ -8,7 +8,7 @@
     <a href="./CODE_OF_CONDUCT.md"><img src="https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg" alt="Code Of Conduct"></a>
 </p>
 
-`ntfuzz` (`nimbleterminal.dev/ntfuzz`) is a single-binary continuous fuzzing orchestrator for Go repositories, backed by **DuckDB** ([`duckdb-go/v2`](https://github.com/duckdb/duckdb-go) and [`ntduckbox`](https://github.com/NimbleTerminal/ntduckbox)) and a **[Bubble Tea v2](https://github.com/charmbracelet/bubbletea)** TUI dashboard served both natively in your terminal and in the browser via **Booba** (`go-booba` + Ghostty/[`ntwebterm`](https://github.com/NimbleTerminal/ntwebterm)).
+`ntfuzz` (`nimbleterminal.dev/ntfuzz`) is a single-binary continuous fuzzing orchestrator for Go repositories, backed by **DuckDB** ([`duckdb-go/v2`](https://github.com/duckdb/duckdb-go) and [`ntduckbox`](https://github.com/NimbleTerminal/ntduckbox)) and a **[Bubble Tea v2](https://github.com/charmbracelet/bubbletea)** TUI dashboard served both natively in your terminal and in the browser via **Booba** ([`nimbleterminal.dev/booba`](https://github.com/NimbleTerminal/booba) + Ghostty/[`ntwebterm`](https://github.com/NimbleTerminal/ntwebterm)).
 
 ---
 
@@ -34,7 +34,7 @@
   - `GET /api/status` — fleet health, 24h run counts, schema version, and active worker jobs
 - **Shared Bubble Tea TUI + Booba Browser Bridge**:
   - The TUI talks strictly to the HTTP API DTOs in `internal/api` (never imports `internal/store` or opens DuckDB directly).
-  - Surfaces keybindings as **Booba Terminal Actions** (OSC 7501) via `go-booba/actions/bubblehelp`.
+  - Surfaces keybindings as **Booba Terminal Actions** (OSC 7501) via `booba/actions/bubblehelp`.
   - Accessible both locally via `ntfuzz tui` and live in a browser Ghostty terminal at `http://127.0.0.1:8080/` during `ntfuzz serve`.
 
 ---
@@ -252,7 +252,7 @@ All metrics use bounded labels (`mode`, `route`, `method`, `status_class`, `reas
 
 > **Transport & Process Boundaries**:
 > - Counters and histograms are held in process memory and **reset on process restart**. Historical retention, alerting, and long-term aggregation require an external Prometheus-compatible collector.
-> - `ntfuzz_terminal_bytes_received_total` and `ntfuzz_terminal_bytes_sent_total` measure terminal PTY payload bytes via `go-booba/serve` `SessionMiddleware` (`InputWriter`/`OutputReader`). WebSocket/WebTransport framing bytes and control messages (`MsgResize`, `MsgPing`/`MsgPong`, `MsgOptions`, `MsgClose`) are handled internally by the transport layer and are not included in PTY byte counters.
+> - `ntfuzz_terminal_bytes_received_total` and `ntfuzz_terminal_bytes_sent_total` measure terminal PTY payload bytes via `booba/serve` `SessionMiddleware` (`InputWriter`/`OutputReader`). WebSocket/WebTransport framing bytes and control messages (`MsgResize`, `MsgPing`/`MsgPong`, `MsgOptions`, `MsgClose`) are handled internally by the transport layer and are not included in PTY byte counters.
 > - `ntfuzz view` only exposes metrics for the viewer process and the age/refresh health of its loaded snapshot; it never fabricates live orchestrator worker activity from snapshot data.
 
 ### Local Scraping Example

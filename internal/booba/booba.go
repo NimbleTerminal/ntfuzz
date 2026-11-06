@@ -11,7 +11,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/NimbleMarkets/go-booba/serve"
+	"nimbleterminal.dev/booba/serve"
 
 	"nimbleterminal.dev/ntfuzz/internal/api"
 	"nimbleterminal.dev/ntfuzz/internal/metrics"

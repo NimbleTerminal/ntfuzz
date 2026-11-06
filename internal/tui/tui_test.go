@@ -8,7 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/NimbleMarkets/go-booba/actions/bubblehelp"
+	"nimbleterminal.dev/booba/actions/bubblehelp"
 
 	"nimbleterminal.dev/ntfuzz/internal/api"
 )

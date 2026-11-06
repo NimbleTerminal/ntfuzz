@@ -12,10 +12,10 @@ import (
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/NimbleMarkets/go-booba/actions"
-	"github.com/NimbleMarkets/go-booba/actions/bubblehelp"
 	"github.com/NimbleMarkets/ntcharts/v2/sparkline"
 	"github.com/charmbracelet/x/ansi"
+	"nimbleterminal.dev/booba/actions"
+	"nimbleterminal.dev/booba/actions/bubblehelp"
 
 	"nimbleterminal.dev/ntfuzz/internal/api"
 )
