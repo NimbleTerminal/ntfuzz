@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <link rel="service-doc" href="/api/docs" type="text/html">
+    <link rel="service-desc" href="/openapi.json" type="application/json">
+    <link rel="describedby" href="/llms.txt" type="text/markdown">
     <title>ntfuzz · Continuous Go Fuzzing Dashboard</title>
     <style>
         :root {
@@ -135,6 +138,14 @@
             border-top: 1px solid #2d3f56;
             padding: 6px 12px;
         }
+        .api-links {
+            flex-shrink: 0;
+            padding: 6px 12px;
+            background: #161f2c;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        .api-links a { color: #7dd3fc; }
         .booba-action {
             min-height: 34px;
         }
@@ -156,6 +167,14 @@
     </header>
     <div id="terminal-container" aria-label="ntfuzz live terminal"></div>
     <div id="action-controls"></div>
+    <nav class="api-links" aria-label="Dashboard data">
+        Read dashboard data as JSON:
+        <a href="/api/crashes?open=true">Open crashes</a> ·
+        <a href="/api/projects">Projects</a> ·
+        <a href="/api/status">Status</a> ·
+        <a href="/api/docs">API documentation</a> ·
+        <a href="/llms.txt">Agent guide</a>
+    </nav>
 
     <script type="module">
         import { BoobaTerminal, installActionBar, resolveBoobaURLs } from './static/booba/booba.js';

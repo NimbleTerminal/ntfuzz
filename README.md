@@ -328,6 +328,20 @@ cannot refresh to v3 snapshots.
 
 ---
 
+## API discovery
+
+The browser dashboard includes server-rendered links to open crashes, projects,
+status, API documentation (`/api/docs`), and an agent guide (`/llms.txt`).
+`/openapi.json` describes the six read endpoints shared by `serve` and `view`,
+including response schemas and query parameters. These embedded resources need
+no JavaScript or external documentation service.
+
+HTML link relations and HTTP `Link` headers advertise `service-doc`,
+`service-desc`, and `describedby`. The guide explains crash investigation,
+numeric target IDs, snapshot freshness, and server-local corpus paths.
+Private live-server crash-fixing remains an operator action outside this read
+API description; public snapshot viewers still expose no mutation endpoint.
+
 ## Open Collaboration
 
 Contributions and feedback are welcome. Please adhere to our [Code of Conduct](./CODE_OF_CONDUCT.md) when engaging our community.

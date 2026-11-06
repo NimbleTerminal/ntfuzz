@@ -1,0 +1,808 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ntfuzz read API",
+    "version": "1.0.0",
+    "description": "Read endpoints shared by live serve and snapshot view. Check /api/status for read_only and snapshot_at. Does not describe private operator mutations."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/api/projects": {
+      "get": {
+        "summary": "List projects",
+        "operationId": "getProject",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Project"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/targets": {
+      "get": {
+        "summary": "List active targets",
+        "operationId": "getTarget",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Project ID or name.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Target"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs": {
+      "get": {
+        "summary": "List runs, newest first",
+        "operationId": "getRun",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Target ID, name, or project/name. Prefer numeric IDs to avoid ambiguity.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Positive row limit; missing or invalid values use the default.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Run"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/crashes": {
+      "get": {
+        "summary": "List crashes",
+        "operationId": "getCrash",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Target ID, name, or project/name. Prefer numeric IDs to avoid ambiguity.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "open",
+            "in": "query",
+            "description": "Defaults to open only; false, 0, or all includes fixed crashes.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "1",
+                "false",
+                "0",
+                "all"
+              ],
+              "default": "true"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Crash"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid open parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coverage/history": {
+      "get": {
+        "summary": "Recent coverage points in chronological order; empty array without target",
+        "operationId": "getCoveragePoint",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Target ID, name, or project/name. Prefer numeric IDs to avoid ambiguity.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Positive row limit; missing or invalid values use the default.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CoveragePoint"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/status": {
+      "get": {
+        "summary": "Fleet status and snapshot freshness",
+        "operationId": "getStatusResponse",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Project": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "git_sha": {
+            "type": "string"
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "sync_error": {
+            "type": "string"
+          },
+          "last_synced": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "target_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "open_crashes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "latest_status": {
+            "type": "string"
+          },
+          "last_run_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "avg_execs_per_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "avg_coverage_pct": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "repo",
+          "dirty",
+          "target_count",
+          "total_runs",
+          "open_crashes",
+          "latest_status",
+          "avg_execs_per_sec",
+          "avg_coverage_pct"
+        ]
+      },
+      "Target": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project_name": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "last_run_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_started": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "execs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "execs_per_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "new_interesting": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "corpus_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "crashes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "coverage_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "status": {
+            "type": "string"
+          },
+          "worker": {
+            "type": "string"
+          },
+          "git_sha": {
+            "type": "string"
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "go_version": {
+            "type": "string"
+          },
+          "open_crashes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "coverage_trend": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "project_name",
+          "package",
+          "name",
+          "duration_sec",
+          "execs",
+          "execs_per_sec",
+          "new_interesting",
+          "corpus_count",
+          "crashes",
+          "coverage_pct",
+          "status",
+          "worker",
+          "dirty",
+          "open_crashes",
+          "total_runs",
+          "coverage_trend"
+        ]
+      },
+      "Run": {
+        "type": "object",
+        "properties": {
+          "diagnostic": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "target_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project_name": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          },
+          "target_name": {
+            "type": "string"
+          },
+          "started": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "execs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "execs_per_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "new_interesting": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "corpus_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "crashes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "coverage_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "status": {
+            "type": "string"
+          },
+          "worker": {
+            "type": "string"
+          },
+          "git_sha": {
+            "type": "string"
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "go_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "target_id",
+          "started",
+          "duration_sec",
+          "execs",
+          "execs_per_sec",
+          "new_interesting",
+          "corpus_count",
+          "crashes",
+          "coverage_pct",
+          "status",
+          "worker",
+          "dirty"
+        ]
+      },
+      "Crash": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "target_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project_name": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          },
+          "target_name": {
+            "type": "string"
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fixed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "stack": {
+            "type": "string"
+          },
+          "stack_fingerprint": {
+            "type": "string"
+          },
+          "input_hash": {
+            "type": "string"
+          },
+          "minimized_input": {
+            "type": "string",
+            "description": "Server-local corpus path, not a download URL. Input bytes are not exposed by this API."
+          },
+          "issue_url": {
+            "type": "string"
+          },
+          "git_sha": {
+            "type": "string"
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "go_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "target_id",
+          "first_seen",
+          "last_seen",
+          "stack",
+          "input_hash",
+          "minimized_input",
+          "issue_url",
+          "dirty"
+        ]
+      },
+      "CoveragePoint": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "target_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "started": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "coverage_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "execs_per_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "new_interesting": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "corpus_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "git_sha": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "target_id",
+          "started",
+          "coverage_pct",
+          "execs_per_sec",
+          "new_interesting",
+          "corpus_count"
+        ]
+      },
+      "ActiveJob": {
+        "type": "object",
+        "properties": {
+          "worker_id": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "fuzztime": {
+            "type": "string"
+          },
+          "git_sha": {
+            "type": "string"
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_id",
+          "project",
+          "package",
+          "target",
+          "fuzztime",
+          "dirty",
+          "started_at",
+          "status"
+        ]
+      },
+      "StatusResponse": {
+        "type": "object",
+        "properties": {
+          "read_only": {
+            "type": "boolean"
+          },
+          "snapshot_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Snapshot publication time; present in read-only mode. Data and worker status are historical."
+          },
+          "fleet_health": {
+            "type": "string"
+          },
+          "open_crashes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "runs_last_24h": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "execs_last_24h": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "avg_execs_per_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "total_projects": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_targets": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "active_workers": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "max_workers": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "active_jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActiveJob"
+            }
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "read_only",
+          "fleet_health",
+          "open_crashes",
+          "runs_last_24h",
+          "execs_last_24h",
+          "avg_execs_per_sec",
+          "total_projects",
+          "total_targets",
+          "active_workers",
+          "max_workers",
+          "schema_version",
+          "active_jobs",
+          "updated_at"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      }
+    }
+  }
+}

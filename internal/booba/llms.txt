@@ -1,0 +1,33 @@
+# ntfuzz dashboard API
+
+> Read fuzzing projects, targets, run diagnostics, coverage, and crash stacks as JSON without running the browser terminal or JavaScript.
+
+All URLs below are relative to this dashboard's origin. GET requests need no request body. This guide and OpenAPI description cover the read endpoints shared by serve and view.
+
+## Investigate a crash
+
+1. GET /api/status. Check read_only and snapshot_at. A snapshot is historical data, not live worker activity; updated_at also equals its publication time. Report snapshot_at when describing freshness. Live mode uses updated_at for response time.
+2. GET /api/crashes?open=true. Match project_name, package, and target_name (exact spelling). An empty array means no matching open crashes in this data, not proof that a target is bug-free.
+3. Read stack, first_seen, last_seen, git_sha, dirty, go_version, input_hash, and stack_fingerprint. fixed_at is omitted for open crashes. git_sha identifies the tested revision, which may differ from a local checkout.
+4. Use the crash's numeric target_id in GET /api/runs?target=8&limit=2 (replace 8 with the actual ID). Review status and diagnostic for recent execution evidence. A historical crash need not have occurred in the latest run.
+5. For a target without an open crash, GET /api/targets?project=PROJECT_NAME and match name and package; use its id. URL-encode parameter values. Numeric IDs avoid ambiguity across packages/projects.
+
+minimized_input is a server-local corpus file path, not a download URL or input bytes. This API does not provide corpus downloads. Stack traces may contain server-local paths as well. Obtain the corpus from the operator if reproducing the exact input is necessary.
+
+## Read endpoints
+
+- [Status](/api/status): fleet summary, read_only, and snapshot_at when applicable.
+- [Projects](/api/projects): project IDs, names, revisions, and sync status.
+- [Targets](/api/targets): active targets; optional project filter accepts project ID or name.
+- [Open crashes](/api/crashes?open=true): defaults to open only; open=false or open=all includes fixed crashes. Optional target filter.
+- [Runs](/api/runs?limit=2): most recent first; optional target filter; limit defaults to 100.
+- [Coverage history](/api/coverage/history?target=8&limit=50): replace example target ID; chronological series of the most recent points, default limit 50. Missing target returns an empty array.
+
+Target filters accept numeric ID, target name, or project-qualified target name (project/name). Prefer IDs. Positive integer limits are supported; missing or invalid limits use the default. List responses are JSON arrays; failures return an error string in a JSON object. open accepts true/1, false/0/all; invalid values return HTTP 400.
+
+## Documentation
+
+- [API documentation](/api/docs): browser-readable usage guide.
+- [OpenAPI description](/openapi.json): schemas and parameters for the read API.
+
+Public snapshot viewers expose no mutation endpoint. Private live servers also support POST /api/crashes/{id}/fix; marking a crash fixed changes stored state and is not needed to investigate it. This read API description does not advertise that operator action as a read operation.

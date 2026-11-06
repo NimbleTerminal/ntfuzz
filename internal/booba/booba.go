@@ -111,6 +111,7 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 	}
 
 	mux := http.NewServeMux()
+	registerDiscovery(mux)
 	if apiServer != nil {
 		mux.Handle("/api/", apiServer)
 	}
@@ -128,9 +129,9 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 	})
 
 	if opts.Metrics != nil {
-		return opts.Metrics.InstrumentHTTP(mux, api.IsInternalRequest), nil
+		return opts.Metrics.InstrumentHTTP(withDiscoveryLinks(mux), api.IsInternalRequest), nil
 	}
-	return mux, nil
+	return withDiscoveryLinks(mux), nil
 }
 
 // ListenAndServe starts the combined HTTP API and Booba web TUI server until ctx is canceled.
