@@ -497,3 +497,42 @@ func TestCrashDrillDownToDetailAndBackToCrashes(t *testing.T) {
 		t.Fatalf("expected Escape from ViewCrashes to return to ViewFleet, got %v", m.mode)
 	}
 }
+
+func TestCoverageTrendConsistencyAndVisibilityAtStandardWidth(t *testing.T) {
+	// 1. All-zero coverage renders dim dots instead of blue bars.
+	zeroTrend := RenderCoverageTrend([]float64{0, 0, 0, 0}, 9)
+	if strings.ContainsAny(zeroTrend, "▁▂▃▄▅▆▇█↑↓→") {
+		t.Fatalf("expected all-zero coverage trend to render dots only, got %q", zeroTrend)
+	}
+
+	// 2. Rising coverage renders bars with trailing '↑'; flat coverage renders '→'; falling renders '↓'.
+	rising := RenderCoverageTrend([]float64{20.0, 45.0, 75.0}, 9)
+	if !strings.Contains(rising, "↑") {
+		t.Fatalf("expected rising coverage trend to include '↑', got %q", rising)
+	}
+	flat := RenderCoverageTrend([]float64{33.9, 33.9, 33.91}, 9)
+	if !strings.Contains(flat, "→") || strings.Contains(flat, "█") {
+		t.Fatalf("expected flat ~34%% coverage to render steady mid-height bars with '→' (no auto-zoom to █), got %q", flat)
+	}
+	falling := RenderCoverageTrend([]float64{80.0, 50.0, 30.0}, 9)
+	if !strings.Contains(falling, "↓") {
+		t.Fatalf("expected falling coverage trend to include '↓', got %q", falling)
+	}
+
+	// 3. At default width (116 cols), COV TREND is visible alongside COV % because TARGET is capped.
+	m := NewModel(nil, time.Second)
+	m.targets = []api.Target{
+		{
+			ID:            1,
+			ProjectName:   "ntfuzz",
+			Name:          "FuzzValidateAndRenderBrandingWithLongName",
+			Status:        "ok",
+			CoveragePct:   64.5,
+			CoverageTrend: []float64{50.0, 58.0, 64.5},
+		},
+	}
+	fleet := m.renderFleetView()
+	if !strings.Contains(fleet, "COV TREND") || !strings.Contains(fleet, "↑") {
+		t.Fatalf("expected COV TREND column and rising indicator at default width 116, got:\n%s", fleet)
+	}
+}

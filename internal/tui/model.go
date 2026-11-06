@@ -965,21 +965,34 @@ func (m Model) renderFleetView() string {
 		columns = append(columns, column{"EXECS/SEC", 10})
 	}
 	if contentWidth >= 95 {
-		columns = append(columns, column{"LAST RUN", 10}, column{"COV %", 7})
+		columns = append(columns, column{"LAST RUN", 10}, column{"COV %", 7}, column{"COV TREND", 9})
 	}
-	if contentWidth >= 120 {
-		columns = append(columns, column{"REVISION", 10}, column{"CORP", 6})
-	}
-	if contentWidth >= 140 {
-		columns = append(columns, column{"TREND", 9})
+	if contentWidth >= 115 {
+		columns = append(columns, column{"CORP", 6}, column{"REVISION", 10})
 	}
 	used := 2 + 2*(len(columns)-1)
 	for _, c := range columns {
 		used += c.width
 	}
+	remaining := max(0, contentWidth-used)
 	for i := range columns {
 		if columns[i].title == "TARGET" {
-			columns[i].width = max(1, columns[i].width+contentWidth-used)
+			maxTarget := 28
+			if contentWidth < 95 {
+				maxTarget = 36
+			}
+			add := min(remaining, max(0, maxTarget-columns[i].width))
+			columns[i].width += add
+			remaining -= add
+		}
+	}
+	if remaining > 0 {
+		for i := range columns {
+			if columns[i].title == "PROJECT" {
+				add := min(remaining, max(0, 22-columns[i].width))
+				columns[i].width += add
+				remaining -= add
+			}
 		}
 	}
 	renderCells := func(values map[string]string) string {
@@ -1061,14 +1074,14 @@ func (m Model) renderFleetView() string {
 				crashCell = statusCrashStyle.Render(fmt.Sprintf("✖ %d", t.OpenCrashes))
 			}
 
-			trend := RenderCoverageTrend(t.CoverageTrend, 8)
+			trend := RenderCoverageTrend(t.CoverageTrend, 9)
 			rev := formatRevision(t.GitSHA, t.Dirty)
 
 			rowStr := cursor + renderCells(map[string]string{
 				"STATUS": badge, "PROJECT": t.ProjectName, "TARGET": t.Name,
 				"REVISION": rev, "LAST RUN": lastRun, "EXECS/SEC": FormatExecRate(t.ExecsPerSec),
 				"CORP": strconv.Itoa(t.CorpusCount), "COV %": fmt.Sprintf("%.1f%%", t.CoveragePct),
-				"TREND": trend, "CRASH": crashCell,
+				"COV TREND": trend, "CRASH": crashCell,
 			})
 			if i == m.selectedIdx {
 				b.WriteString(selectedRowStyle.Render(rowStr) + "\n")
@@ -1105,7 +1118,7 @@ func (m Model) renderDetailView() string {
 		cardValueStyle.Render(formatRevision(t.GitSHA, t.Dirty)),
 		subtleTextStyle.Render(nonEmpty(t.GoVersion, "n/a")),
 	)
-	fmt.Fprintf(&top, "Status: %s  •  Rate: %s  •  Corpus: %d  •  Coverage: %.1f%%  •  Trend: %s  •  Runs: %d  •  Open Crashes: %d\n",
+	fmt.Fprintf(&top, "Status: %s  •  Rate: %s  •  Corpus: %d  •  Coverage: %.1f%%  •  Cov Trend (0-100%%): %s  •  Runs: %d  •  Open Crashes: %d\n",
 		RenderStatusBadge(t.Status, false),
 		cardValueStyle.Render(FormatExecRate(t.ExecsPerSec)),
 		t.CorpusCount,
@@ -1116,9 +1129,7 @@ func (m Model) renderDetailView() string {
 	)
 
 	// Sparkline + Recent Runs
-	sparkBox := panelStyle.Render(
-		cardTitleStyle.Render("Corpus Coverage Sparkline (ntcharts)") + "\n" + m.covSparkline.View(),
-	)
+	sparkBox := panelStyle.Render(m.renderSparklineSummary())
 
 	runsBox := activePanelStyle.Render(
 		cardTitleStyle.Render(fmt.Sprintf("Recent Runs (%d)", len(m.detailRuns))) + "\n" + m.runsTable.View(),
@@ -1185,11 +1196,42 @@ func (m Model) renderDetailView() string {
 	}
 	crashBox := panelStyle.Width(max(1, m.width-2)).Render(crashB.String())
 
+	middleSection := lipgloss.JoinHorizontal(lipgloss.Top, runsBox, sparkBox)
+	if lipgloss.Width(runsBox)+lipgloss.Width(sparkBox) > m.width {
+		middleSection = lipgloss.JoinVertical(lipgloss.Left, runsBox, sparkBox)
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		panelStyle.Width(max(1, m.width-2)).Render(top.String()),
-		lipgloss.JoinHorizontal(lipgloss.Top, runsBox, sparkBox),
+		middleSection,
 		crashBox,
 	)
+}
+
+func (m Model) renderSparklineSummary() string {
+	title := cardTitleStyle.Render(fmt.Sprintf("Coverage & Corpus Trend (%d runs)", len(m.detailHistory)))
+	if len(m.detailHistory) == 0 {
+		return title + "\n" + subtleTextStyle.Render("No coverage history recorded yet.")
+	}
+	first := m.detailHistory[0]
+	last := m.detailHistory[len(m.detailHistory)-1]
+	minCov, maxCov := first.CoveragePct, first.CoveragePct
+	for _, pt := range m.detailHistory {
+		if pt.CoveragePct < minCov {
+			minCov = pt.CoveragePct
+		}
+		if pt.CoveragePct > maxCov {
+			maxCov = pt.CoveragePct
+		}
+	}
+	deltaCov := last.CoveragePct - first.CoveragePct
+	deltaCorp := last.CorpusCount - first.CorpusCount
+	statsLine := fmt.Sprintf("Now: %.1f%% (%+.1f%%)  •  Min/Max: %.1f%%–%.1f%%\nCorpus: %d → %d (%+d)",
+		last.CoveragePct, deltaCov, minCov, maxCov,
+		first.CorpusCount, last.CorpusCount, deltaCorp,
+	)
+	axisLine := subtleTextStyle.Render(fmt.Sprintf("oldest (#%d) ───────────► latest (#%d)", first.RunID, last.RunID))
+	return title + "\n" + subtleTextStyle.Render(statsLine) + "\n" + m.covSparkline.View() + "\n" + axisLine
 }
 
 func (m Model) renderCrashesView() string {

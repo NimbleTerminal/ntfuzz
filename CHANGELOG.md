@@ -7,6 +7,10 @@
 - **TUI column sorting**: press `s` in the fleet view to cycle the sort column (`STATUS`, `PROJECT`, `TARGET`, `CRASH`, `EXECS/SEC`, `LAST RUN`, `COV %`, `REVISION`, `CORP`) and `S` to reverse sort direction, with `▲`/`▼` indicators in column headers and the filter bar.
 - **Crash report drill-down**: press `enter` on any crash in the Open Crashes view (`c`) to open its target detail view with the full multi-line crash stack trace expanded, and `esc` to return to the crashes list.
 
+### Changed
+
+- **Readable coverage sparklines and tighter `TARGET` column width**: cap the fleet `TARGET` column width so `COV TREND` is visible alongside `COV %` at standard terminal widths (`>= 101` cols), scale `RenderCoverageTrend` consistently against 0–100% coverage with a trailing `↑`/`→`/`↓` direction indicator (and `·` for 0% unmeasured runs instead of auto-zooming tiny fluctuations), and add `Now / Δ / Min–Max / Corpus` context above the target-detail sparkline with vertical wrapping on narrower terminals.
+
 ### Fixed
 
 - `FuzzValidateAndRenderBranding`: check the rendered `.brand-operator` badge instead of searching the entire HTML document for `clean.Name`, fixing false-positive crashes when the brand name is `<`, `>`, or another substring of the static HTML template.

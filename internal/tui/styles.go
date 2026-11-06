@@ -133,6 +133,9 @@ func RenderStatusBadge(status string, isRunning bool) string {
 }
 
 // RenderCoverageTrend renders a compact colored Lipgloss bar chart for a slice of coverage percentages.
+// Bars are scaled consistently against 0-100% statement coverage so heights are comparable across targets;
+// zero/unmeasured points render as dim dots ('·'), and when width >= 4 with at least 2 points a trailing
+// direction glyph ('↑', '→', '↓') summarizes net coverage movement across the window.
 func RenderCoverageTrend(points []float64, width int) string {
 	if width <= 0 {
 		width = 8
@@ -151,36 +154,40 @@ func RenderCoverageTrend(points []float64, width int) string {
 		return statusPendingStyle.Render(strings.Repeat("·", width))
 	}
 
-	if len(points) > width {
-		points = points[len(points)-width:]
+	hasPositive := false
+	for _, v := range points {
+		if v > 0 {
+			hasPositive = true
+			break
+		}
+	}
+	if !hasPositive {
+		return statusPendingStyle.Render(strings.Repeat("·", width))
 	}
 
-	minVal, maxVal := points[0], points[0]
-	for _, v := range points {
-		if v < minVal {
-			minVal = v
-		}
-		if v > maxVal {
-			maxVal = v
-		}
+	showArrow := width >= 4 && len(points) >= 2
+	barSlots := width
+	if showArrow {
+		barSlots = width - 1
+	}
+
+	if len(points) > barSlots {
+		points = points[len(points)-barSlots:]
 	}
 
 	var b strings.Builder
-	pad := width - len(points)
+	pad := barSlots - len(points)
 	if pad > 0 {
 		b.WriteString(statusPendingStyle.Render(strings.Repeat("·", pad)))
 	}
 
-	span := maxVal - minVal
 	for _, v := range points {
-		var idx int
-		if span < 0.01 {
-			// Flat non-zero coverage: scale relative to 100%
-			idx = int(math.Round((math.Min(math.Max(v, 0), 100) / 100.0) * float64(len(trendBars)-1)))
-		} else {
-			norm := (v - minVal) / span
-			idx = int(math.Round(norm * float64(len(trendBars)-1)))
+		if v <= 0 {
+			b.WriteString(statusPendingStyle.Render("·"))
+			continue
 		}
+		clamped := math.Min(math.Max(v, 0), 100)
+		idx := int(math.Round((clamped / 100.0) * float64(len(trendBars)-1)))
 		if idx < 0 {
 			idx = 0
 		}
@@ -189,6 +196,18 @@ func RenderCoverageTrend(points []float64, width int) string {
 		}
 		st := lipgloss.NewStyle().Foreground(lipgloss.Color(trendCols[idx]))
 		b.WriteString(st.Render(string(trendBars[idx])))
+	}
+
+	if showArrow {
+		delta := points[len(points)-1] - points[0]
+		switch {
+		case delta > 0.05:
+			b.WriteString(statusOKStyle.Render("↑"))
+		case delta < -0.05:
+			b.WriteString(statusWarnStyle.Render("↓"))
+		default:
+			b.WriteString(subtleTextStyle.Render("→"))
+		}
 	}
 	return b.String()
 }
