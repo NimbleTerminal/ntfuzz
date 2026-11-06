@@ -269,9 +269,35 @@ func TestRunDiagnosticView(t *testing.T) {
 }
 
 func TestStatusBadgesFitStatusColumn(t *testing.T) {
-	for _, status := range []string{"ok", "crash", "missing_target", "incomplete", "canceled", "error", "fuzzing", "pending"} {
+	for _, status := range []string{"ok", "crash", "missing_target", "incomplete", "canceled", "error", "fuzzing", "pending", "snapshot"} {
 		if got := lipgloss.Width(RenderStatusBadge(status, false)); got != 7 {
 			t.Fatalf("badge for %q is %d columns wide, want 7", status, got)
 		}
+	}
+}
+
+func TestSnapshotOverviewCardsReflectSnapshotHealth(t *testing.T) {
+	m := NewModelOptions(nil, time.Second, true)
+	at := time.Now().UTC().Add(-3 * time.Minute)
+	m.status = api.StatusResponse{ReadOnly: true, SnapshotAt: &at, FleetHealth: "snapshot", OpenCrashes: 1}
+
+	cards := m.renderOverviewCards()
+	if strings.Contains(cards, "PEND") || !strings.Contains(cards, "CRASH") {
+		t.Fatalf("snapshot with open crashes should show CRASH, not PEND:\n%s", cards)
+	}
+	if strings.Contains(cards, "Active Workers") || !strings.Contains(cards, "Snapshot Age") || !strings.Contains(cards, "3m") {
+		t.Fatalf("read-only cards should replace workers with snapshot age:\n%s", cards)
+	}
+
+	m.status.OpenCrashes = 0
+	if cards = m.renderOverviewCards(); !strings.Contains(cards, "OK") {
+		t.Fatalf("snapshot without crashes should show OK:\n%s", cards)
+	}
+}
+
+func TestSnapshotBadgeIsNotPending(t *testing.T) {
+	badge := RenderStatusBadge("snapshot", false)
+	if strings.Contains(badge, "PEND") || lipgloss.Width(badge) != 7 {
+		t.Fatalf("badge=%q width=%d", badge, lipgloss.Width(badge))
 	}
 }

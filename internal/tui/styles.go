@@ -125,6 +125,8 @@ func RenderStatusBadge(status string, isRunning bool) string {
 		return statusWarnStyle.Render("! ERROR")
 	case "fuzzing", "running":
 		return statusRunningStyle.Render("⚡ FUZZ")
+	case "snapshot":
+		return statusOKStyle.Render("◆ SNAP ")
 	default:
 		return statusPendingStyle.Render("○ PEND ")
 	}

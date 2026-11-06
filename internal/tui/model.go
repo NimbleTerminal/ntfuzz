@@ -582,18 +582,36 @@ func (m Model) renderOverviewCards() string {
 	runsVal := cardValueStyle.Render(fmt.Sprintf("%d", m.status.RunsLast24h))
 	runsSub := subtleTextStyle.Render(fmt.Sprintf(" (%s avg)", FormatExecRate(m.status.AvgExecsSec)))
 
-	workerState := fmt.Sprintf("%d / %d", m.status.ActiveWorkers, max(m.status.MaxWorkers, m.status.ActiveWorkers))
-	workerVal := cardValueStyle.Render(workerState)
-	if m.status.ActiveWorkers > 0 {
-		workerVal = statusRunningStyle.Render("⚡ " + workerState)
+	// A snapshot viewer has no orchestrator, so derive fleet health from the published data
+	// and show how fresh that data is instead of a worker count that is always zero.
+	health := m.status.FleetHealth
+	if health == "snapshot" {
+		health = "healthy"
+		if m.status.OpenCrashes > 0 {
+			health = "crashes_detected"
+		}
 	}
+	fleetVal := RenderStatusBadge(health, m.status.ActiveWorkers > 0)
 
-	fleetVal := RenderStatusBadge(m.status.FleetHealth, m.status.ActiveWorkers > 0)
+	var c4 string
+	if m.readOnly || m.status.ReadOnly {
+		age := "unknown"
+		if m.status.SnapshotAt != nil {
+			age = formatRelativeTime(*m.status.SnapshotAt)
+		}
+		c4 = cardStyle.Render(cardTitleStyle.Render("Snapshot Age") + "\n" + cardValueStyle.Render(age))
+	} else {
+		workerState := fmt.Sprintf("%d / %d", m.status.ActiveWorkers, max(m.status.MaxWorkers, m.status.ActiveWorkers))
+		workerVal := cardValueStyle.Render(workerState)
+		if m.status.ActiveWorkers > 0 {
+			workerVal = statusRunningStyle.Render("⚡ " + workerState)
+		}
+		c4 = cardStyle.Render(cardTitleStyle.Render("Active Workers") + "\n" + workerVal)
+	}
 
 	c1 := cardStyle.Render(cardTitleStyle.Render("Fleet Status") + "\n" + fleetVal)
 	c2 := cardStyle.Render(cardTitleStyle.Render("Open Crashes") + "\n" + crashVal)
 	c3 := cardStyle.Render(cardTitleStyle.Render("Runs (24h)") + "\n" + runsVal + runsSub)
-	c4 := cardStyle.Render(cardTitleStyle.Render("Active Workers") + "\n" + workerVal)
 	c5 := cardStyle.Render(cardTitleStyle.Render("Projects / Targets") + "\n" +
 		cardValueStyle.Render(fmt.Sprintf("%d / %d", m.status.TotalProjects, m.status.TotalTargets)))
 
