@@ -2,20 +2,31 @@
 
 ## [Unreleased]
 
-- Bump indirect dependencies (go-json, cpuid, mcp-go, terminfo) and the checkout/setup-go GitHub Actions to v7. quic-go stays at v0.64.1 until webtransport-go supports v0.65.
+## [0.2.0] - 2026-11-05
+
+### Added
+
+- **API discovery**: `/api/docs` (HTML reference), `/openapi.json` (OpenAPI description of the read endpoints shared by `serve` and `view`), and `/llms.txt` (agent guide), advertised via `Link` headers on every response.
+- **Run diagnostics**: failed runs retain a bounded, redacted capture of the fuzz process output, persisted in schema v3 and exposed through `GET /api/runs` and the target-detail TUI, including in published snapshots.
+- **Run outcome classification**: runs now report `ok` only after coordinator progress and a standalone `PASS`; `missing_target`, `incomplete`, `canceled`, `error`, and `crash` are distinguished explicitly.
+- Live subprocess regression tests covering subpackages with and without root Go files, corpus cache delivery, outcome classification, and optional representative project campaigns.
+- Snapshot viewer TUI shows a **Snapshot Age** card in read-only mode in place of the always-zero Active Workers card, and the Fleet Status card derives health from the published data (CRASH or OK) instead of a PEND badge.
+
+### Changed
+
+- **Schema v3** adds the run `diagnostic` column. Writer migration is automatic; viewers require a matching v3 snapshot, so upgrade the writer and viewer together and publish a new snapshot before starting the new viewer.
 - Migrate from the archived `github.com/NimbleMarkets/go-booba` v0.11.0 to `nimbleterminal.dev/booba` v0.12.1, which bundles ntwebterm 0.4.2 and its browser text-selection fixes (wrapped-line copy, wide-character word selection, listener cleanup).
-- Snapshot viewer TUI: the Fleet Status card now reflects the published data (CRASH when open crashes exist, otherwise OK) instead of a misleading PEND badge, and the always-zero Active Workers card is replaced by a Snapshot Age card in read-only mode.
-- Fix bounded diagnostic capture: small outputs are kept verbatim and the omission marker is only inserted on line boundaries, so `PASS` and `--- FAIL` lines are never split.
-- Classify crashes correctly when target output contains coordinator phrases such as "failed to unmarshal" or "no tests to run"; infrastructure and missing-target detection are anchored on Go's own lines.
-- Keep crash records whose failing input was written before the runner deadline fired instead of discarding them as errors.
 - Canceled runs no longer count as failed targets in fleet health or project status.
 - Shorten the incomplete, missing, and canceled TUI badges to fit the 7-column status column.
+- Bump indirect dependencies (go-json, cpuid, mcp-go, terminfo) and the checkout/setup-go GitHub Actions to v7. quic-go stays at v0.64.1 until webtransport-go supports v0.65.
 - README: correct schema version, remove the duplicate license section, move run-outcome documentation into the main body, and drop internal deployment notes.
-- Fix subpackage fuzz selection by placing the package before forwarded test flags; apply package-first ordering to coverage replay.
-- Require fuzz coordinator progress and PASS before reporting success; distinguish missing targets, incomplete runs, cancellation, infrastructure errors, and fuzz crashes.
-- Bound failed-run diagnostics, redact common sensitive values, persist them in schema v3, and expose them in the runs API and target-detail TUI, including snapshots.
-- Add always-on live subprocess regressions for subpackages with and without root Go files, cache delivery, outcome classification, and optional representative project campaigns.
-- Document coordinated writer/viewer upgrade and fresh-run acceptance. Historical records and open crashes are unchanged.
+
+### Fixed
+
+- Subpackage fuzz targets were never selected: the package path now precedes forwarded test flags for both the fuzz run and the coverage replay.
+- Bounded diagnostic capture keeps small outputs verbatim and only inserts the omission marker on line boundaries, so `PASS` and `--- FAIL` lines are never split by the truncation.
+- Crashes whose panic text contains coordinator phrases such as "failed to unmarshal" or "no tests to run" are classified as crashes; infrastructure and missing-target detection are anchored on Go's own output lines.
+- Crash records whose failing input was written before the runner deadline fired are kept instead of being discarded as errors.
 
 ## [0.1.0] - 2026-11-05
 
