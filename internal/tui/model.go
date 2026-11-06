@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,10 +34,87 @@ type fleetDataMsg struct {
 
 type detailDataMsg struct {
 	targetID int64
+	target   *api.Target
 	runs     []api.Run
 	crashes  []api.Crash
 	history  []api.CoveragePoint
 	err      error
+}
+
+// SortColumn identifies the column used to sort the fleet target table.
+type SortColumn int
+
+const (
+	SortNone SortColumn = iota
+	SortStatus
+	SortProject
+	SortTarget
+	SortCrashes
+	SortExecRate
+	SortLastRun
+	SortCoverage
+	SortRevision
+	SortCorpus
+)
+
+// Title returns the fleet table header title corresponding to s.
+func (s SortColumn) Title() string {
+	switch s {
+	case SortStatus:
+		return "STATUS"
+	case SortProject:
+		return "PROJECT"
+	case SortTarget:
+		return "TARGET"
+	case SortCrashes:
+		return "CRASH"
+	case SortExecRate:
+		return "EXECS/SEC"
+	case SortLastRun:
+		return "LAST RUN"
+	case SortCoverage:
+		return "COV %"
+	case SortRevision:
+		return "REVISION"
+	case SortCorpus:
+		return "CORP"
+	default:
+		return ""
+	}
+}
+
+func (s SortColumn) next() SortColumn {
+	switch s {
+	case SortNone:
+		return SortStatus
+	case SortStatus:
+		return SortProject
+	case SortProject:
+		return SortTarget
+	case SortTarget:
+		return SortCrashes
+	case SortCrashes:
+		return SortExecRate
+	case SortExecRate:
+		return SortLastRun
+	case SortLastRun:
+		return SortCoverage
+	case SortCoverage:
+		return SortRevision
+	case SortRevision:
+		return SortCorpus
+	default:
+		return SortStatus
+	}
+}
+
+func (s SortColumn) defaultDesc() bool {
+	switch s {
+	case SortProject, SortTarget, SortRevision:
+		return false
+	default:
+		return true
+	}
 }
 
 type crashFixedMsg struct {
@@ -53,6 +132,7 @@ type Model struct {
 	width    int
 	height   int
 	mode     ViewMode
+	prevMode ViewMode
 	hideHelp bool
 	help     help.Model
 
@@ -64,17 +144,20 @@ type Model struct {
 	projectIdx  int // 0 = All Projects, 1..N = projects[projectIdx-1]
 	selectedIdx int
 	crashIdx    int
+	sortCol     SortColumn
+	sortDesc    bool
 	lastUpdated time.Time
 	lastErr     error
 	loading     bool
 
 	// Target Detail state
-	detailTarget  *api.Target
-	detailRuns    []api.Run
-	detailCrashes []api.Crash
-	detailHistory []api.CoveragePoint
-	runsTable     table.Model
-	covSparkline  sparkline.Model
+	detailTarget    *api.Target
+	selectedCrashID int64
+	detailRuns      []api.Run
+	detailCrashes   []api.Crash
+	detailHistory   []api.CoveragePoint
+	runsTable       table.Model
+	covSparkline    sparkline.Model
 }
 
 // NewModel constructs a pure Bubble Tea Model backed by the HTTP API client.
@@ -270,8 +353,19 @@ func (m Model) fetchDetailCmd(targetID int64) tea.Cmd {
 		if err != nil {
 			return detailDataMsg{targetID: targetID, err: err}
 		}
+		var resolvedTarget *api.Target
+		if allTargets, tErr := client.GetTargets(ctx, ""); tErr == nil {
+			for i := range allTargets {
+				if allTargets[i].ID == targetID {
+					tCopy := allTargets[i]
+					resolvedTarget = &tCopy
+					break
+				}
+			}
+		}
 		return detailDataMsg{
 			targetID: targetID,
+			target:   resolvedTarget,
 			runs:     runs,
 			crashes:  crashes,
 			history:  history,
@@ -340,6 +434,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.targets = msg.targets
 		m.openCrashes = msg.crashes
 		m.lastUpdated = time.Now()
+		m.sortTargets()
 
 		if m.projectIdx > len(m.projects) {
 			m.projectIdx = 0
@@ -374,8 +469,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.lastErr = nil
+		if msg.target != nil {
+			tCopy := *msg.target
+			m.detailTarget = &tCopy
+		}
 		m.detailRuns = msg.runs
-		m.detailCrashes = msg.crashes
+		if len(msg.crashes) > 0 || m.client != nil {
+			m.detailCrashes = msg.crashes
+		}
 		m.detailHistory = msg.history
 		m.syncDetailWidgets()
 		return m, nil
@@ -417,8 +518,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case key.Matches(msg, km.Back):
+			if m.mode == ViewDetail {
+				if m.prevMode == ViewCrashes {
+					m.mode = ViewCrashes
+				} else {
+					m.mode = ViewFleet
+				}
+				return m, nil
+			}
 			if m.mode != ViewFleet {
 				m.mode = ViewFleet
+				return m, nil
+			}
+
+		case key.Matches(msg, km.Sort):
+			if m.mode == ViewFleet {
+				m.sortCol = m.sortCol.next()
+				m.sortDesc = m.sortCol.defaultDesc()
+				m.sortTargets()
+				return m, nil
+			}
+
+		case key.Matches(msg, km.SortDir):
+			if m.mode == ViewFleet {
+				if m.sortCol == SortNone {
+					m.sortCol = SortProject
+					m.sortDesc = true
+				} else {
+					m.sortDesc = !m.sortDesc
+				}
+				m.sortTargets()
 				return m, nil
 			}
 
@@ -437,9 +566,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == ViewFleet && len(m.targets) > 0 && m.selectedIdx < len(m.targets) {
 				selected := m.targets[m.selectedIdx]
 				m.detailTarget = &selected
+				m.selectedCrashID = 0
+				m.prevMode = ViewFleet
 				m.mode = ViewDetail
 				m.detailRuns = nil
 				m.detailCrashes = nil
+				m.detailHistory = nil
+				return m, m.fetchDetailCmd(selected.ID)
+			}
+			if m.mode == ViewCrashes && len(m.openCrashes) > 0 && m.crashIdx < len(m.openCrashes) {
+				crash := m.openCrashes[m.crashIdx]
+				selected := m.findOrBuildTargetForCrash(crash)
+				m.detailTarget = &selected
+				m.selectedCrashID = crash.ID
+				m.prevMode = ViewCrashes
+				m.mode = ViewDetail
+				m.detailRuns = nil
+				m.detailCrashes = m.crashesForTarget(selected.ID, crash)
 				m.detailHistory = nil
 				return m, m.fetchDetailCmd(selected.ID)
 			}
@@ -486,6 +629,133 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+func (m *Model) sortTargets() {
+	if m.sortCol == SortNone || len(m.targets) <= 1 {
+		return
+	}
+	activeMap := map[string]bool{}
+	for _, job := range m.status.ActiveJobs {
+		activeMap[job.Project+"/"+job.Target] = true
+	}
+	slices.SortFunc(m.targets, func(a, b api.Target) int {
+		var c int
+		switch m.sortCol {
+		case SortStatus:
+			c = cmp.Compare(
+				statusSortRank(a.Status, activeMap[a.ProjectName+"/"+a.Name], a.OpenCrashes),
+				statusSortRank(b.Status, activeMap[b.ProjectName+"/"+b.Name], b.OpenCrashes),
+			)
+		case SortProject:
+			c = cmp.Compare(a.ProjectName, b.ProjectName)
+		case SortTarget:
+			c = cmp.Compare(a.Name, b.Name)
+		case SortCrashes:
+			c = cmp.Compare(a.OpenCrashes, b.OpenCrashes)
+		case SortExecRate:
+			c = cmp.Compare(a.ExecsPerSec, b.ExecsPerSec)
+		case SortLastRun:
+			c = compareTimePtr(a.LastStarted, b.LastStarted)
+		case SortCoverage:
+			c = cmp.Compare(a.CoveragePct, b.CoveragePct)
+		case SortRevision:
+			c = cmp.Compare(formatRevision(a.GitSHA, a.Dirty), formatRevision(b.GitSHA, b.Dirty))
+		case SortCorpus:
+			c = cmp.Compare(a.CorpusCount, b.CorpusCount)
+		}
+		if m.sortDesc {
+			c = -c
+		}
+		if c != 0 {
+			return c
+		}
+		if c = cmp.Compare(a.ProjectName, b.ProjectName); c != 0 {
+			return c
+		}
+		if c = cmp.Compare(a.Package, b.Package); c != 0 {
+			return c
+		}
+		if c = cmp.Compare(a.Name, b.Name); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+}
+
+func statusSortRank(status string, isRunning bool, openCrashes int) int {
+	if isRunning {
+		return 4
+	}
+	switch strings.ToLower(status) {
+	case "crash", "crashes_detected", "fail":
+		return 8
+	case "error":
+		return 7
+	case "missing_target":
+		return 6
+	case "incomplete":
+		return 5
+	case "fuzzing", "running":
+		return 4
+	case "canceled":
+		return 3
+	case "ok", "pass", "healthy":
+		if openCrashes > 0 {
+			return 8
+		}
+		return 1
+	default:
+		return 2
+	}
+}
+
+func compareTimePtr(a, b *time.Time) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
+	default:
+		return a.Compare(*b)
+	}
+}
+
+func (m Model) findOrBuildTargetForCrash(crash api.Crash) api.Target {
+	for _, t := range m.targets {
+		if crash.TargetID != 0 && t.ID == crash.TargetID {
+			return t
+		}
+		if crash.TargetID == 0 && t.ProjectName == crash.ProjectName && t.Name == crash.TargetName {
+			return t
+		}
+	}
+	return api.Target{
+		ID:          crash.TargetID,
+		ProjectName: crash.ProjectName,
+		Package:     crash.Package,
+		Name:        crash.TargetName,
+		Status:      "crash",
+		GitSHA:      crash.GitSHA,
+		Dirty:       crash.Dirty,
+		GoVersion:   crash.GoVersion,
+		OpenCrashes: 1,
+	}
+}
+
+func (m Model) crashesForTarget(targetID int64, primary api.Crash) []api.Crash {
+	out := []api.Crash{primary}
+	for _, c := range m.openCrashes {
+		if c.ID == primary.ID {
+			continue
+		}
+		if targetID != 0 && c.TargetID == targetID {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (m *Model) syncDetailWidgets() {
@@ -660,13 +930,24 @@ func (m Model) renderFleetView() string {
 		}
 	}
 	filter := "Filter: " + strings.Join(filterTabs, "  ")
+	sortIndicator := ""
+	if m.sortCol != SortNone {
+		arrow := "▲"
+		if m.sortDesc {
+			arrow = "▼"
+		}
+		sortIndicator = fmt.Sprintf("  •  Sort: %s %s", m.sortCol.Title(), arrow)
+	}
 	contentWidth := max(1, m.width-6)
-	if lipgloss.Width(filter) > contentWidth {
+	if lipgloss.Width(filter+sortIndicator) > contentWidth {
 		label := "All Projects"
 		if m.projectIdx > 0 && m.projectIdx <= len(m.projects) {
 			label = m.projects[m.projectIdx-1].Name
 		}
 		filter = "Filter: " + label + "  (p/tab to cycle)"
+	}
+	if sortIndicator != "" && lipgloss.Width(filter+sortIndicator) <= contentWidth {
+		filter += subtleTextStyle.Render(sortIndicator)
 	}
 	b.WriteString(lipgloss.NewStyle().MaxWidth(contentWidth).Render(filter) + "\n\n")
 
@@ -676,12 +957,12 @@ func (m Model) renderFleetView() string {
 		title string
 		width int
 	}
-	columns := []column{{"STATUS", 7}, {"TARGET", 12}, {"CRASH", 5}}
+	columns := []column{{"STATUS", 7}, {"TARGET", 12}, {"CRASH", 6}}
 	if contentWidth >= 60 {
 		columns = append(columns[:1], append([]column{{"PROJECT", 14}}, columns[1:]...)...)
 	}
 	if contentWidth >= 75 {
-		columns = append(columns, column{"EXECS/SEC", 9})
+		columns = append(columns, column{"EXECS/SEC", 10})
 	}
 	if contentWidth >= 95 {
 		columns = append(columns, column{"LAST RUN", 10}, column{"COV %", 7})
@@ -710,7 +991,19 @@ func (m Model) renderFleetView() string {
 	}
 	labels := map[string]string{}
 	for _, c := range columns {
-		labels[c.title] = c.title
+		label := c.title
+		if m.sortCol.Title() == c.title {
+			arrow := "▲"
+			if m.sortDesc {
+				arrow = "▼"
+			}
+			if lipgloss.Width(c.title)+2 <= c.width {
+				label = c.title + " " + arrow
+			} else {
+				label = c.title + arrow
+			}
+		}
+		labels[c.title] = label
 	}
 	b.WriteString(headerRowStyle.Render("  "+renderCells(labels)) + "\n")
 
@@ -845,19 +1138,49 @@ func (m Model) renderDetailView() string {
 	if len(m.detailCrashes) == 0 {
 		crashB.WriteString(statusOKStyle.Render("✓ No open crashes for this target."))
 	} else {
-		for idx, c := range m.detailCrashes {
+		ordered := make([]api.Crash, 0, len(m.detailCrashes))
+		for _, c := range m.detailCrashes {
+			if m.selectedCrashID != 0 && c.ID == m.selectedCrashID {
+				ordered = append(ordered, c)
+			}
+		}
+		for _, c := range m.detailCrashes {
+			if m.selectedCrashID == 0 || c.ID != m.selectedCrashID {
+				ordered = append(ordered, c)
+			}
+		}
+		for idx, c := range ordered {
 			if idx >= 3 {
-				crashB.WriteString(subtleTextStyle.Render(fmt.Sprintf("\n...and %d more open crashes", len(m.detailCrashes)-3)))
+				crashB.WriteString(subtleTextStyle.Render(fmt.Sprintf("\n...and %d more open crashes", len(ordered)-3)))
 				break
 			}
-			fmt.Fprintf(&crashB, "• %s  fp:%s  rev:%s  artifact: %s  (last seen %s)\n  %s\n",
+			bullet := "•"
+			if m.selectedCrashID != 0 && c.ID == m.selectedCrashID {
+				bullet = "▸"
+			}
+			fmt.Fprintf(&crashB, "%s [id:%d] %s  fp:%s  rev:%s  artifact: %s  (last seen %s)\n",
+				bullet,
+				c.ID,
 				statusCrashStyle.Render("hash:"+truncate(c.InputHash, 16)),
 				subtleTextStyle.Render(truncate(c.StackFingerprint, 12)),
 				subtleTextStyle.Render(formatRevision(c.GitSHA, c.Dirty)),
 				subtleTextStyle.Render(c.MinimizedInput),
 				formatRelativeTime(c.LastSeen),
-				truncate(firstLine(c.Stack), 90),
 			)
+			if idx == 0 {
+				stackLines := strings.Split(strings.TrimSpace(c.Stack), "\n")
+				if len(stackLines) > 12 {
+					stackLines = append(stackLines[:12], "...(truncated)")
+				}
+				for _, sl := range stackLines {
+					if strings.TrimSpace(sl) == "" {
+						continue
+					}
+					fmt.Fprintf(&crashB, "    %s\n", truncate(sl, max(20, m.width-10)))
+				}
+			} else {
+				fmt.Fprintf(&crashB, "    %s\n", truncate(crashSummaryLine(c.Stack), max(20, m.width-10)))
+			}
 		}
 	}
 	crashBox := panelStyle.Width(max(1, m.width-2)).Render(crashB.String())
@@ -871,11 +1194,12 @@ func (m Model) renderDetailView() string {
 
 func (m Model) renderCrashesView() string {
 	var b strings.Builder
-	title := fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d)", len(m.openCrashes))
+	title := fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d) — press 'enter' for target detail", len(m.openCrashes))
 	if !m.readOnly {
-		title += " — press 'x' to mark selected crash fixed"
+		title += ", 'x' to mark selected crash fixed"
 	}
-	b.WriteString(headerRowStyle.Render(title) + "\n\n")
+	contentWidth := max(1, m.width-6)
+	b.WriteString(headerRowStyle.Render(ansi.Truncate(title, contentWidth, "…")) + "\n\n")
 
 	if len(m.openCrashes) == 0 {
 		b.WriteString(statusOKStyle.Render("  ✓ Zero open crashes across the fleet.\n"))
@@ -894,9 +1218,11 @@ func (m Model) renderCrashesView() string {
 			truncate(c.StackFingerprint, 10),
 			formatRelativeTime(c.LastSeen),
 			c.MinimizedInput)
+		line = ansi.Truncate(line, contentWidth, "…")
 		if i == m.crashIdx {
 			b.WriteString(selectedRowStyle.Render(line) + "\n")
-			b.WriteString(subtleTextStyle.Render("    Stack: "+firstLine(c.Stack)) + "\n")
+			stackPreview := ansi.Truncate("    Stack: "+crashSummaryLine(c.Stack), contentWidth, "…")
+			b.WriteString(subtleTextStyle.Render(stackPreview) + "\n")
 		} else {
 			b.WriteString(normalRowStyle.Render(line) + "\n")
 		}
@@ -964,6 +1290,17 @@ func firstLine(s string) string {
 		return strings.TrimSpace(s[:idx])
 	}
 	return s
+}
+
+func crashSummaryLine(stack string) string {
+	for line := range strings.SplitSeq(strings.TrimSpace(stack), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--- FAIL:") {
+			continue
+		}
+		return trimmed
+	}
+	return firstLine(stack)
 }
 
 func (m Model) keyMap() KeyMap {

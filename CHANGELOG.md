@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **TUI column sorting**: press `s` in the fleet view to cycle the sort column (`STATUS`, `PROJECT`, `TARGET`, `CRASH`, `EXECS/SEC`, `LAST RUN`, `COV %`, `REVISION`, `CORP`) and `S` to reverse sort direction, with `▲`/`▼` indicators in column headers and the filter bar.
+- **Crash report drill-down**: press `enter` on any crash in the Open Crashes view (`c`) to open its target detail view with the full multi-line crash stack trace expanded, and `esc` to return to the crashes list.
+
+### Fixed
+
+- `FuzzValidateAndRenderBranding`: check the rendered `.brand-operator` badge instead of searching the entire HTML document for `clean.Name`, fixing false-positive crashes when the brand name is `<`, `>`, or another substring of the static HTML template.
+- Crash stack extraction and fingerprinting: strip `FAIL\t<pkg>\t<duration>` and `[diagnostic tail]` footer lines in `extractCrashStack` and normalize package failure durations in `FingerprintStack` so identical failures with different package run times do not create duplicate crash records.
+- Corpus coverage replay (`measureCorpusCoverage`): increase the `-cover` subprocess timeout from 15s to 45s to match the runner's build overhead allowance so packages with CGo/large dependency graphs or larger corpora do not time out at 0% coverage.
+
 ## [0.2.0] - 2026-11-05
 
 ### Added

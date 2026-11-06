@@ -84,10 +84,11 @@ var (
 	// Go's own "nothing to run" diagnostics, anchored so target output cannot spoof them.
 	reMissingTarget = regexp.MustCompile(`(?m)^(?:testing: warning: no (?:fuzz )?tests to (?:fuzz|run)|\?\s+\S+\s+\[no test files\]|ok\s+\S+\s+[\d.]+s\s+\[no tests to run\])\s*$`)
 
-	reFileLine     = regexp.MustCompile(`(?m)([A-Za-z0-9_./\\-]+\.go):\d+(\s*\+0x[0-9a-fA-F]+)?`)
-	reHexAddr      = regexp.MustCompile(`0x[0-9a-fA-F]+`)
-	reGoroutine    = regexp.MustCompile(`goroutine \d+`)
-	reFailDuration = regexp.MustCompile(`\([0-9.]+s\)`)
+	reFileLine        = regexp.MustCompile(`(?m)([A-Za-z0-9_./\\-]+\.go):\d+(\s*\+0x[0-9a-fA-F]+)?`)
+	reHexAddr         = regexp.MustCompile(`0x[0-9a-fA-F]+`)
+	reGoroutine       = regexp.MustCompile(`goroutine \d+`)
+	reFailDuration    = regexp.MustCompile(`\([0-9.]+s\)`)
+	rePkgFailDuration = regexp.MustCompile(`(?m)^(FAIL\t\S+\t)[0-9.]+s`)
 )
 
 // RunTarget executes `go test -fuzz` with GOMAXPROCS=1 and -parallel=1, copies any crash inputs into
@@ -390,6 +391,7 @@ func FingerprintStack(stack string) string {
 		return filepath.Base(m[:colon])
 	})
 	normalized = reFailDuration.ReplaceAllString(normalized, "(0s)")
+	normalized = rePkgFailDuration.ReplaceAllString(normalized, "${1}0s")
 	normalized = reHexAddr.ReplaceAllString(normalized, "0xADDR")
 	normalized = reGoroutine.ReplaceAllString(normalized, "goroutine N")
 	sum := sha256.Sum256([]byte(normalized))
@@ -468,7 +470,7 @@ func measureCorpusCoverage(ctx context.Context, moduleDir, pkgArg, exactPattern,
 		}
 	}
 
-	covCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	covCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(covCtx, "go", "test", pkgArg,
@@ -567,6 +569,8 @@ func extractCrashStack(output string) string {
 			if trimmed == "" ||
 				strings.HasPrefix(trimmed, "exit status ") ||
 				trimmed == "FAIL" ||
+				strings.HasPrefix(trimmed, "FAIL\t") ||
+				strings.HasPrefix(trimmed, "[diagnostic tail") ||
 				strings.HasPrefix(trimmed, "Failing input written to ") ||
 				strings.HasPrefix(trimmed, "To re-run:") ||
 				strings.HasPrefix(trimmed, "go test ") {

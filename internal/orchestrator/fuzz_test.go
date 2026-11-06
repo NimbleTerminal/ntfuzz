@@ -148,7 +148,7 @@ func FuzzParseFuzzOutput(f *testing.F) {
 }
 
 func FuzzFingerprintStack(f *testing.F) {
-	f.Add("--- FAIL: FuzzDecode (0.42s)\n    /tmp/work/codec_test.go:24: unexpected header 0xdeadbeef\ngoroutine 18 [running]:\npkg.fn at /a/b/file.go:100 +0x1a\n")
+	f.Add("--- FAIL: FuzzDecode (0.42s)\n    /tmp/work/codec_test.go:24: unexpected header 0xdeadbeef\ngoroutine 18 [running]:\npkg.fn at /a/b/file.go:100 +0x1a\nFAIL\texample.com/pkg\t0.42s\n")
 	f.Add("panic: boom\ngoroutine 1 [running]:\nmain.go:12 +0x04\n")
 	f.Add("   \n\t  ")
 
@@ -177,6 +177,7 @@ func FuzzFingerprintStack(f *testing.F) {
 		// Goroutine ID and duration shifts must not alter the fingerprint.
 		shifted := strings.ReplaceAll(stack, "goroutine 1", "goroutine 98765")
 		shifted = strings.ReplaceAll(shifted, "(0.42s)", "(9.99s)")
+		shifted = strings.ReplaceAll(shifted, "FAIL\texample.com/pkg\t0.42s", "FAIL\texample.com/pkg\t9.99s")
 		if fpShift := FingerprintStack(shifted); fpShift != fp1 {
 			t.Fatalf("fingerprint changed across goroutine/duration normalization: %q vs %q", fp1, fpShift)
 		}

@@ -131,6 +131,7 @@ fuzz: elapsed: 1s, execs: 1420 (1420/sec), new interesting: 1 (total: 3)
     go test -run=FuzzDecode/9f8e7d6c5b4a3210
 FAIL
 exit status 1
+FAIL	example.com/demo/codec	1.425s
 `
 	crashOut2 := `--- FAIL: FuzzDecode (0.91s)
     --- FAIL: FuzzDecode (0.01s)
@@ -139,14 +140,19 @@ exit status 1
     Failing input written to testdata/fuzz/FuzzDecode/1111111111111111
 FAIL
 exit status 1
+FAIL	example.com/demo/codec	9.707s
+[diagnostic tail]
 `
 	res1 := ParseFuzzOutput(crashOut1, time.Now().UTC(), 1.0, errors.New("exit status 1"))
 	res2 := ParseFuzzOutput(crashOut2, time.Now().UTC(), 1.0, errors.New("exit status 1"))
 	if res1.Status != "crash" || len(res1.CrashRecords) != 1 {
 		t.Fatalf("expected 1 crash record, got %+v", res1)
 	}
-	if strings.Contains(res1.CrashRecords[0].Stack, "Failing input written to") {
-		t.Fatalf("expected extractCrashStack to strip footer, got:\n%s", res1.CrashRecords[0].Stack)
+	if strings.Contains(res1.CrashRecords[0].Stack, "Failing input written to") ||
+		strings.Contains(res1.CrashRecords[0].Stack, "FAIL\t") ||
+		strings.Contains(res2.CrashRecords[0].Stack, "[diagnostic tail") {
+		t.Fatalf("expected extractCrashStack to strip footer, got:\n%s\nand:\n%s",
+			res1.CrashRecords[0].Stack, res2.CrashRecords[0].Stack)
 	}
 	// Stack fingerprint should match despite path, duration, and line number changes
 	if res1.CrashRecords[0].StackFingerprint == "" || res1.CrashRecords[0].StackFingerprint != res2.CrashRecords[0].StackFingerprint {

@@ -2,6 +2,8 @@ package booba
 
 import (
 	"bytes"
+	"fmt"
+	"html"
 	"net/url"
 	"strings"
 	"testing"
@@ -10,6 +12,9 @@ import (
 
 func FuzzValidateAndRenderBranding(f *testing.F) {
 	f.Add("", "", "")
+	f.Add("<", "", "")
+	f.Add(">", "", "")
+	f.Add("<a>", "https://example.com", "#123456")
 	f.Add("Nimble Terminal", "https://nimbleterminal.com", "#10b981")
 	f.Add("Acme & <Friends>", "https://example.org/fuzz?team=core", "#38BDF8")
 	f.Add("<script>alert(1)</script>", "javascript:alert(1)", "#123456")
@@ -74,9 +79,33 @@ func FuzzValidateAndRenderBranding(f *testing.F) {
 		if !bytes.Contains(rendered, []byte("renderer: 'auto'")) {
 			t.Fatalf("rendered HTML missing renderer: 'auto'")
 		}
-		if clean.Name != "" && strings.ContainsAny(clean.Name, "<>") {
-			if bytes.Contains(rendered, []byte(clean.Name)) {
-				t.Fatalf("rendered HTML contained unescaped angle brackets from Name %q", clean.Name)
+		if clean.Name == "" {
+			if bytes.Contains(rendered, []byte(`class="brand-operator"`)) {
+				t.Fatalf("rendered HTML unexpectedly contained brand-operator element for empty Name")
+			}
+		} else {
+			escapedName := html.EscapeString(clean.Name)
+			if strings.ContainsAny(escapedName, "<>\"'") {
+				t.Fatalf("escaped Name %q still contained raw HTML special characters", escapedName)
+			}
+			var wantBadge string
+			if clean.URL != "" {
+				escapedURL := html.EscapeString(clean.URL)
+				wantBadge = fmt.Sprintf(
+					`<a class="brand-operator" href="%s" target="_blank" rel="noopener noreferrer" title="%s">%s</a>`,
+					escapedURL,
+					escapedName,
+					escapedName,
+				)
+			} else {
+				wantBadge = fmt.Sprintf(
+					`<span class="brand-operator" title="%s">%s</span>`,
+					escapedName,
+					escapedName,
+				)
+			}
+			if !bytes.Contains(rendered, []byte(wantBadge)) {
+				t.Fatalf("rendered HTML missing escaped operator badge %q for Name %q", wantBadge, clean.Name)
 			}
 		}
 	})

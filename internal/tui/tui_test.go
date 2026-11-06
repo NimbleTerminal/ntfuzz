@@ -301,3 +301,199 @@ func TestSnapshotBadgeIsNotPending(t *testing.T) {
 		t.Fatalf("badge=%q width=%d", badge, lipgloss.Width(badge))
 	}
 }
+
+func TestColumnSortingAndDirectionToggle(t *testing.T) {
+	m := NewModel(nil, time.Second)
+	m.width = 160
+	m.height = 40
+
+	t1 := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+
+	next, _ := m.Update(fleetDataMsg{
+		targets: []api.Target{
+			{
+				ID:          1,
+				ProjectName: "zeta",
+				Package:     "example.com/zeta",
+				Name:        "FuzzBeta",
+				Status:      "ok",
+				OpenCrashes: 0,
+				ExecsPerSec: 500,
+				LastStarted: &t1,
+				CoveragePct: 20.0,
+				GitSHA:      "bbbb2222",
+				CorpusCount: 10,
+			},
+			{
+				ID:          2,
+				ProjectName: "alpha",
+				Package:     "example.com/alpha",
+				Name:        "FuzzAlpha",
+				Status:      "crash",
+				OpenCrashes: 3,
+				ExecsPerSec: 5000,
+				LastStarted: &t2,
+				CoveragePct: 80.0,
+				GitSHA:      "aaaa1111",
+				CorpusCount: 90,
+			},
+		},
+	})
+	m = next.(Model)
+
+	// Initial order is preserved when SortNone is active.
+	if m.targets[0].ID != 1 {
+		t.Fatalf("expected initial order to preserve API order (ID 1 first), got ID %d", m.targets[0].ID)
+	}
+
+	// 1. Press 's' -> SortStatus (default ▼: crash first).
+	next, _ = m.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
+	m = next.(Model)
+	if m.sortCol != SortStatus || !m.sortDesc || m.targets[0].ID != 2 {
+		t.Fatalf("expected SortStatus ▼ with crash target (ID 2) first, got col=%v desc=%v first=%d", m.sortCol, m.sortDesc, m.targets[0].ID)
+	}
+	if !strings.Contains(m.renderFleetView(), "STATUS▼") {
+		t.Fatalf("expected STATUS▼ header indicator in fleet view:\n%s", m.renderFleetView())
+	}
+
+	// Press 'S' -> reverse to SortStatus ▲ (ok first).
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'S', Text: "S"})
+	m = next.(Model)
+	if m.sortCol != SortStatus || m.sortDesc || m.targets[0].ID != 1 {
+		t.Fatalf("expected SortStatus ▲ with ok target (ID 1) first, got col=%v desc=%v first=%d", m.sortCol, m.sortDesc, m.targets[0].ID)
+	}
+	if !strings.Contains(m.renderFleetView(), "STATUS▲") {
+		t.Fatalf("expected STATUS▲ header indicator in fleet view:\n%s", m.renderFleetView())
+	}
+
+	// 2. Press 's' -> SortProject ▲ (alpha first).
+	next, _ = m.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
+	m = next.(Model)
+	if m.sortCol != SortProject || m.sortDesc || m.targets[0].ProjectName != "alpha" {
+		t.Fatalf("expected SortProject ▲ with alpha first, got col=%v desc=%v first=%s", m.sortCol, m.sortDesc, m.targets[0].ProjectName)
+	}
+	if !strings.Contains(m.renderFleetView(), "PROJECT ▲") {
+		t.Fatalf("expected PROJECT ▲ header indicator in fleet view:\n%s", m.renderFleetView())
+	}
+
+	// Press 'S' -> SortProject ▼ (zeta first).
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'S', Text: "S"})
+	m = next.(Model)
+	if !m.sortDesc || m.targets[0].ProjectName != "zeta" {
+		t.Fatalf("expected SortProject ▼ with zeta first, got desc=%v first=%s", m.sortDesc, m.targets[0].ProjectName)
+	}
+
+	// Cycle through remaining columns: TARGET, CRASH, EXECS/SEC, LAST RUN, COV %, REVISION, CORP.
+	expectedCols := []SortColumn{
+		SortTarget,
+		SortCrashes,
+		SortExecRate,
+		SortLastRun,
+		SortCoverage,
+		SortRevision,
+		SortCorpus,
+	}
+	for _, wantCol := range expectedCols {
+		next, _ = m.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
+		m = next.(Model)
+		if m.sortCol != wantCol {
+			t.Fatalf("expected sortCol %v, got %v", wantCol, m.sortCol)
+		}
+		if m.targets[0].ID != 2 {
+			t.Fatalf("for %v (default desc=%v), expected target ID 2 first, got ID %d", wantCol.Title(), m.sortDesc, m.targets[0].ID)
+		}
+	}
+}
+
+func TestCrashDrillDownToDetailAndBackToCrashes(t *testing.T) {
+	m := NewModel(nil, time.Second)
+	m.width = 140
+	m.height = 40
+
+	now := time.Now().UTC()
+	multiLineStack := "--- FAIL: FuzzValidateAndRenderBranding (9.66s)\n    --- FAIL: FuzzValidateAndRenderBranding (0.00s)\n        fuzz_test.go:79: rendered HTML contained unescaped angle brackets\n        branding.go:151: RenderIndexHTML"
+
+	next, _ := m.Update(fleetDataMsg{
+		targets: []api.Target{
+			{
+				ID:          82,
+				ProjectID:   18,
+				ProjectName: "ntfuzz",
+				Package:     "nimbleterminal.dev/ntfuzz/internal/booba",
+				Name:        "FuzzValidateAndRenderBranding",
+				Status:      "crash",
+				OpenCrashes: 1,
+				GitSHA:      "1d257f2c",
+				GoVersion:   "go1.27.3",
+			},
+		},
+		crashes: []api.Crash{
+			{
+				ID:               6,
+				TargetID:         82,
+				ProjectName:      "ntfuzz",
+				Package:          "nimbleterminal.dev/ntfuzz/internal/booba",
+				TargetName:       "FuzzValidateAndRenderBranding",
+				FirstSeen:        now,
+				LastSeen:         now,
+				Stack:            multiLineStack,
+				StackFingerprint: "1832bb5bf3bf1db6",
+				InputHash:        "2ecfc5401aa9973e",
+				MinimizedInput:   "/corpus/crashes/2ecfc5401aa9973e",
+				GitSHA:           "1d257f2c",
+				GoVersion:        "go1.27.3",
+			},
+		},
+	})
+	m = next.(Model)
+
+	// Switch to Crashes view ('c').
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	m = next.(Model)
+	if m.mode != ViewCrashes {
+		t.Fatalf("expected ViewCrashes, got %v", m.mode)
+	}
+	crashesView := m.View().Content
+	// Crashes view summary skips the outer "--- FAIL:" wrapper to show the actual failure line.
+	if !strings.Contains(crashesView, "fuzz_test.go:79: rendered HTML contained unescaped angle brackets") {
+		t.Fatalf("expected crash summary in crashes view to show failure line, got:\n%s", crashesView)
+	}
+
+	// Press 'enter' on the selected crash to drill down into Target Detail view.
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(Model)
+	if m.mode != ViewDetail {
+		t.Fatalf("expected ViewDetail after pressing Enter in ViewCrashes, got %v", m.mode)
+	}
+	if m.detailTarget == nil || m.detailTarget.ID != 82 {
+		t.Fatalf("expected detailTarget ID 82, got %+v", m.detailTarget)
+	}
+
+	detailView := m.View().Content
+	// Detail view must show the full multi-line stack trace panel, including deeper lines.
+	for _, want := range []string{
+		"FuzzValidateAndRenderBranding",
+		"2ecfc5401aa9973e",
+		"fuzz_test.go:79: rendered HTML contained unescaped angle brackets",
+		"branding.go:151: RenderIndexHTML",
+	} {
+		if !strings.Contains(detailView, want) {
+			t.Fatalf("expected detail view after crash drill-down to contain %q, got:\n%s", want, detailView)
+		}
+	}
+
+	// Press 'esc' in Detail view -> should return to ViewCrashes (where we drilled down from).
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(Model)
+	if m.mode != ViewCrashes {
+		t.Fatalf("expected Escape from crash-drilled Detail view to return to ViewCrashes, got %v", m.mode)
+	}
+
+	// Press 'esc' again in ViewCrashes -> returns to ViewFleet.
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(Model)
+	if m.mode != ViewFleet {
+		t.Fatalf("expected Escape from ViewCrashes to return to ViewFleet, got %v", m.mode)
+	}
+}
