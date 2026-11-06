@@ -1,0 +1,47 @@
+# Copy to terraform.tfvars and customize for your DigitalOcean account.
+# Authenticate via: export DIGITALOCEAN_TOKEN="dop_v1_..."
+
+name         = "ntfuzz"
+region       = "nyc3"
+droplet_size = "s-4vcpu-8gb"
+volume_size_gib = 50
+
+# Fingerprints or numeric IDs of SSH keys uploaded to DigitalOcean
+ssh_key_fingerprints = [
+  "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+]
+
+# Restrict SSH (and operator tunnel) access to your office/VPN CIDR if desired
+allowed_ssh_cidrs = [
+  "0.0.0.0/0",
+  "::/0",
+]
+
+# Public domain for automatic Let's Encrypt HTTPS via Caddy
+domain      = "fuzz.example.com"
+manage_dns  = false
+dns_zone    = "example.com"
+record_name = "fuzz"
+
+# Fuzzing orchestrator tuning
+workers           = 2
+snapshot_interval = "1m"
+view_refresh      = "10s"
+
+# Optional browser header branding
+brand_name   = "Example Security"
+brand_url    = "https://example.com"
+brand_accent = "#58A6FF"
+
+# Optional custom /etc/ntfuzz/projects.yaml content
+projects_yaml = <<-YAML
+  corpus_dir: /var/lib/ntfuzz/corpus
+  work_dir: /var/lib/ntfuzz/repos
+  default_fuzztime: 15s
+
+  projects:
+    - name: ntfuzz
+      repo: https://github.com/NimbleTerminal/ntfuzz.git
+      branch: main
+      fuzztime: 15s
+YAML

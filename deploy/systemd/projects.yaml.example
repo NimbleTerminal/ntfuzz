@@ -1,0 +1,19 @@
+# /etc/ntfuzz/projects.yaml
+# Production fleet configuration for ntfuzz serve.
+# Supports remote Git repository URLs and local paths on disk.
+
+corpus_dir: /var/lib/ntfuzz/corpus
+work_dir: /var/lib/ntfuzz/repos
+default_fuzztime: 15s
+
+projects:
+  - name: ntfuzz
+    repo: https://github.com/NimbleTerminal/ntfuzz.git
+    branch: main
+    fuzztime: 15s
+
+  # Add your own Go repositories with native FuzzXxx(f *testing.F) targets:
+  # - name: my-service
+  #   repo: https://github.com/example/my-service.git
+  #   branch: main
+  #   fuzztime: 20s

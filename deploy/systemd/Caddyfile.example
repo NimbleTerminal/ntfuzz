@@ -1,0 +1,19 @@
+# /etc/caddy/Caddyfile
+# Replace fuzz.example.com with your public domain name (or :80 for HTTP-only IP access).
+# Caddy automatically provisions and renews Let's Encrypt / ZeroSSL TLS certificates.
+
+fuzz.example.com {
+	encode zstd gzip
+
+	# Proxy public web terminal (WebSocket / WebTransport) and read-only JSON API
+	# to the isolated ntfuzz-view snapshot viewer process.
+	reverse_proxy 127.0.0.1:8081 {
+		flush_interval -1
+	}
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}

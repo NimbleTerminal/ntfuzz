@@ -1,0 +1,18 @@
+# Optional systemd socket unit for running ntfuzz-view with --listen-fd 3 and PrivateNetwork=true.
+# When using socket activation:
+#   1. Copy this file to /etc/systemd/system/ntfuzz-view.socket
+#   2. In ntfuzz-view.service, replace `--listen 127.0.0.1:8081 --metrics-listen 127.0.0.1:9091`
+#      with `--listen-fd 3 --metrics=false` and add `PrivateNetwork=true` + `Sockets=ntfuzz-view.socket`
+#   3. Enable the socket: `sudo systemctl enable --now ntfuzz-view.socket`
+
+[Unit]
+Description=ntfuzz Public Snapshot Viewer Socket (Loopback FD 3)
+Documentation=https://github.com/NimbleTerminal/ntfuzz
+
+[Socket]
+ListenStream=127.0.0.1:8081
+NoDelay=true
+FileDescriptorName=http
+
+[Install]
+WantedBy=sockets.target

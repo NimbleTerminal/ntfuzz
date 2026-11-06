@@ -6,6 +6,7 @@
 
 - **TUI column sorting**: press `s` in the fleet view to cycle the sort column (`STATUS`, `PROJECT`, `TARGET`, `CRASH`, `EXECS/SEC`, `LAST RUN`, `COV %`, `REVISION`, `CORP`) and `S` to reverse sort direction, with `▲`/`▼` indicators in column headers and the filter bar.
 - **Crash report drill-down**: press `enter` on any crash in the Open Crashes view (`c`) to open its target detail view with the full multi-line crash stack trace expanded, and `esc` to return to the crashes list.
+- **Self-hosting cookbook & DigitalOcean Terraform module**: add [`docs/deployment-cookbook.md`](docs/deployment-cookbook.md), [`deploy/terraform/digitalocean/`](deploy/terraform/digitalocean/), and reference `systemd`/Caddy units in [`deploy/systemd/`](deploy/systemd/) for deploying isolated `ntfuzz serve` + `ntfuzz view` instances.
 
 ### Changed
 

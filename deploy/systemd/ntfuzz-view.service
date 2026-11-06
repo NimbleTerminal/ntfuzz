@@ -1,0 +1,44 @@
+[Unit]
+Description=ntfuzz Public Snapshot Viewer (Read-Only Web Terminal & API)
+Documentation=https://github.com/NimbleTerminal/ntfuzz
+After=network.target ntfuzz-serve.service
+Wants=ntfuzz-serve.service
+
+[Service]
+Type=simple
+User=ntfuzz-view
+Group=ntfuzz-view
+WorkingDirectory=/var/lib/ntfuzz/public
+
+Environment="HOME=/var/lib/ntfuzz/public"
+Environment="NTFUZZ_VIEW_REFRESH=10s"
+EnvironmentFile=-/etc/ntfuzz/ntfuzz.env
+
+# Standard loopback mode (Caddy proxies to 127.0.0.1:8081).
+# For systemd socket activation with PrivateNetwork=true, see ntfuzz-view.socket
+# and replace --listen 127.0.0.1:8081 with --listen-fd 3 --metrics=false.
+ExecStart=/usr/local/bin/ntfuzz view \
+  --snapshots /var/lib/ntfuzz/public \
+  --listen 127.0.0.1:8081 \
+  --refresh ${NTFUZZ_VIEW_REFRESH} \
+  --metrics-listen 127.0.0.1:9091
+
+Restart=always
+RestartSec=3s
+
+# Strict read-only confinement: viewer cannot read private DB, corpora, or git checkouts
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadOnlyPaths=/var/lib/ntfuzz/public /etc/ntfuzz
+InaccessiblePaths=/var/lib/ntfuzz/private /var/lib/ntfuzz/corpus /var/lib/ntfuzz/repos /var/lib/ntfuzz/cache
+
+[Install]
+WantedBy=multi-user.target

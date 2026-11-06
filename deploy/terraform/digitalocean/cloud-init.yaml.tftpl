@@ -1,0 +1,228 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - build-essential
+  - ca-certificates
+  - curl
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+  - git
+  - jq
+  - pkg-config
+
+write_files:
+  - path: /etc/ntfuzz/projects.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      ${indent(6, projects_yaml)}
+
+  - path: /etc/ntfuzz/ntfuzz.env
+    owner: root:root
+    permissions: "0644"
+    content: |
+      NTFUZZ_WORKERS=${workers}
+      NTFUZZ_SNAPSHOT_INTERVAL=${snapshot_interval}
+      NTFUZZ_VIEW_REFRESH=${view_refresh}
+      NTFUZZ_BRAND_NAME=${jsonencode(brand_name)}
+      NTFUZZ_BRAND_URL=${jsonencode(brand_url)}
+      NTFUZZ_BRAND_ACCENT=${jsonencode(brand_accent)}
+
+  - path: /etc/systemd/system/ntfuzz-serve.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=ntfuzz Continuous Go Fuzzing Orchestrator (Private Writer)
+      Documentation=https://github.com/NimbleTerminal/ntfuzz
+      After=network-online.target local-fs.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=ntfuzz
+      Group=ntfuzz
+      WorkingDirectory=/var/lib/ntfuzz
+
+      Environment="PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+      Environment="HOME=/var/lib/ntfuzz/cache"
+      Environment="GOCACHE=/var/lib/ntfuzz/cache/go-build"
+      Environment="GOMODCACHE=/var/lib/ntfuzz/cache/pkg/mod"
+      Environment="NTFUZZ_WORKERS=${workers}"
+      Environment="NTFUZZ_SNAPSHOT_INTERVAL=${snapshot_interval}"
+      EnvironmentFile=-/etc/ntfuzz/ntfuzz.env
+
+      ExecStart=/usr/local/bin/ntfuzz serve \
+        --config /etc/ntfuzz/projects.yaml \
+        --db /var/lib/ntfuzz/private/live.duckdb \
+        --listen 127.0.0.1:8080 \
+        --workers $${NTFUZZ_WORKERS} \
+        --snapshot-dir /var/lib/ntfuzz/public \
+        --snapshot-interval $${NTFUZZ_SNAPSHOT_INTERVAL} \
+        --metrics-listen 127.0.0.1:9090
+
+      Restart=on-failure
+      RestartSec=5s
+      TimeoutStopSec=45s
+
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ProtectHome=true
+      PrivateTmp=true
+      PrivateDevices=true
+      ProtectKernelTunables=true
+      ProtectKernelModules=true
+      ProtectControlGroups=true
+      ReadWritePaths=/var/lib/ntfuzz
+      ReadOnlyPaths=/etc/ntfuzz
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/ntfuzz-view.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=ntfuzz Public Snapshot Viewer (Read-Only Web Terminal & API)
+      Documentation=https://github.com/NimbleTerminal/ntfuzz
+      After=network.target ntfuzz-serve.service
+      Wants=ntfuzz-serve.service
+
+      [Service]
+      Type=simple
+      User=ntfuzz-view
+      Group=ntfuzz-view
+      WorkingDirectory=/var/lib/ntfuzz/public
+
+      Environment="HOME=/var/lib/ntfuzz/public"
+      Environment="NTFUZZ_VIEW_REFRESH=${view_refresh}"
+      EnvironmentFile=-/etc/ntfuzz/ntfuzz.env
+
+      ExecStart=/usr/local/bin/ntfuzz view \
+        --snapshots /var/lib/ntfuzz/public \
+        --listen 127.0.0.1:8081 \
+        --refresh $${NTFUZZ_VIEW_REFRESH} \
+        --metrics-listen 127.0.0.1:9091
+
+      Restart=always
+      RestartSec=3s
+
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ProtectHome=true
+      PrivateTmp=true
+      PrivateDevices=true
+      ProtectKernelTunables=true
+      ProtectKernelModules=true
+      ProtectControlGroups=true
+      RestrictSUIDSGID=true
+      LockPersonality=true
+      ReadOnlyPaths=/var/lib/ntfuzz/public /etc/ntfuzz
+      InaccessiblePaths=/var/lib/ntfuzz/private /var/lib/ntfuzz/corpus /var/lib/ntfuzz/repos /var/lib/ntfuzz/cache
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/sbin/ntfuzz-bootstrap.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      VOLUME_DEV="/dev/disk/by-id/scsi-0DO_Volume_${volume_name}"
+      MOUNT_DIR="/var/lib/ntfuzz"
+
+      echo "[ntfuzz-bootstrap] Waiting for block storage volume $${VOLUME_DEV}..."
+      for _ in $(seq 1 60); do
+        if [ -b "$${VOLUME_DEV}" ]; then
+          break
+        fi
+        sleep 2
+      done
+
+      mkdir -p "$${MOUNT_DIR}"
+      if [ -b "$${VOLUME_DEV}" ]; then
+        if ! grep -qs "$${MOUNT_DIR}" /etc/fstab; then
+          echo "$${VOLUME_DEV} $${MOUNT_DIR} ext4 defaults,nofail,discard 0 2" >> /etc/fstab
+        fi
+        mount -a
+      else
+        echo "[ntfuzz-bootstrap] WARNING: $${VOLUME_DEV} not found; falling back to root filesystem at $${MOUNT_DIR}"
+      fi
+
+      # Create isolated system users for writer (ntfuzz) and reader (ntfuzz-view)
+      if ! id -u ntfuzz >/dev/null 2>&1; then
+        useradd --system --user-group --home-dir /var/lib/ntfuzz --no-create-home --shell /usr/sbin/nologin ntfuzz
+      fi
+      if ! id -u ntfuzz-view >/dev/null 2>&1; then
+        useradd --system --user-group --home-dir /var/lib/ntfuzz/public --no-create-home --shell /usr/sbin/nologin ntfuzz-view
+      fi
+
+      # Create directory hierarchy with strict privilege separation
+      install -d -m 0755 -o root -g root /var/lib/ntfuzz
+      install -d -m 0750 -o ntfuzz -g ntfuzz /var/lib/ntfuzz/private
+      install -d -m 0750 -o ntfuzz -g ntfuzz /var/lib/ntfuzz/corpus
+      install -d -m 0750 -o ntfuzz -g ntfuzz /var/lib/ntfuzz/repos
+      install -d -m 0750 -o ntfuzz -g ntfuzz /var/lib/ntfuzz/cache
+      install -d -m 0755 -o ntfuzz -g ntfuzz /var/lib/ntfuzz/public
+
+      # Install Go toolchain
+      ARCH="amd64"
+      if [ "$(uname -m)" = "aarch64" ]; then
+        ARCH="arm64"
+      fi
+      GO_TARBALL="go${go_version}.linux-$${ARCH}.tar.gz"
+      curl -fsSL "https://go.dev/dl/$${GO_TARBALL}" -o "/tmp/$${GO_TARBALL}"
+      rm -rf /usr/local/go
+      tar -C /usr/local -xzf "/tmp/$${GO_TARBALL}"
+      rm -f "/tmp/$${GO_TARBALL}"
+      ln -sf /usr/local/go/bin/go /usr/local/bin/go
+      ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+
+      # Build and install ntfuzz from source (full clone so future git fetch/checkout upgrades work for branches, tags, or SHAs)
+      SRC_DIR="/opt/ntfuzz-src"
+      rm -rf "$${SRC_DIR}"
+      git clone "${ntfuzz_repo}" "$${SRC_DIR}"
+      (
+        cd "$${SRC_DIR}"
+        git checkout "${ntfuzz_ref}"
+        export PATH="/usr/local/go/bin:$${PATH}"
+        export HOME="/root"
+        CGO_ENABLED=1 go build -trimpath -o /usr/local/bin/ntfuzz ./cmd/ntfuzz
+      )
+      chmod 0755 /usr/local/bin/ntfuzz
+
+      # Install official Caddy package for automatic HTTPS reverse proxy
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
+      apt-get update -y
+      apt-get install -y caddy
+
+      cat >/etc/caddy/Caddyfile <<'CADDYEOF'
+      ${caddy_site_address} {
+          encode zstd gzip
+
+          reverse_proxy 127.0.0.1:8081 {
+              flush_interval -1
+          }
+
+          header {
+              X-Content-Type-Options "nosniff"
+              X-Frame-Options "SAMEORIGIN"
+              Referrer-Policy "strict-origin-when-cross-origin"
+          }
+      }
+      CADDYEOF
+
+      systemctl daemon-reload
+      systemctl enable --now ntfuzz-serve.service
+      systemctl enable --now ntfuzz-view.service
+      systemctl enable --now caddy.service
+      systemctl reload caddy.service || true
+
+runcmd:
+  - [/usr/local/sbin/ntfuzz-bootstrap.sh]

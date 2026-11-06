@@ -177,6 +177,14 @@ exposes fixed dashboard queries, not arbitrary user SQL. Set process memory/CPU
 limits in deployment as well. Public snapshots expose the configured fleet's
 project/run/crash details; publish only data intended for public viewing.
 
+### Self-Hosting & Deployment Cookbook
+
+For end-to-end production deployment recipes—including isolated `systemd` service units, Caddy automatic HTTPS, SSH operator tunnels, and automated provisioning on DigitalOcean—see:
+
+- **[Self-Hosting & Deployment Cookbook](docs/deployment-cookbook.md)**: architecture guide, manual Linux setup, socket activation (`--listen-fd 3`), day-2 operator workflows, and Prometheus alerting.
+- **[DigitalOcean Terraform Module](deploy/terraform/digitalocean/)**: reusable Terraform configuration provisioning a Droplet, persistent Block Storage Volume (`/var/lib/ntfuzz`), Cloud Firewall, and `cloud-init` bootstrap.
+- **[Reference `systemd` & Caddy Units](deploy/systemd/)**: standalone `ntfuzz-serve.service`, `ntfuzz-view.service`, `ntfuzz-view.socket`, `Caddyfile.example`, and `projects.yaml.example`.
+
 ---
 
 ## Browser Dashboard Branding
