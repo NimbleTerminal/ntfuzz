@@ -22,7 +22,7 @@
   - Copies minimized crash inputs into `.ntfuzz/corpus/<project>/crashes/...`, hashes the actual input bytes, and computes a normalized stack fingerprint (stripping paths, line numbers, and hex addresses).
   - Replays the cached fuzz corpus (`-test.fuzzcachedir`) under `-cover` to track real corpus statement coverage alongside corpus size (`corpus_count`).
 - **DuckDB Metadata & History Store**:
-  - Versioned schema migrations (`schema_migrations` table, currently v2) for `projects`, `targets`, `runs`, `crashes`, indexes, and a single-query `latest_target_status` view that aggregates 10-point coverage trends via DuckDB `LIST`.
+  - Versioned schema migrations (`schema_migrations` table, currently v3) for `projects`, `targets`, `runs`, `crashes`, indexes, and a single-query `latest_target_status` view that aggregates 10-point coverage trends via DuckDB `LIST`.
   - Automatic 14-day run retention pruning (preserving at least the latest 10 runs per target).
 - **HTTP JSON API (`/api/*`)**:
   - `GET /api/projects` — project list with revision, sync status, and latest summary
@@ -133,12 +133,6 @@ projects:
 | `q` / `ctrl+c` | Quit | Exit the TUI client |
 
 ---
-
-## License
-
-Released under the [MIT License](./LICENSE).
-
-
 
 ## Public read-only snapshots
 
@@ -298,31 +292,7 @@ scrape_configs:
 - **`ntfuzz` service metrics (`/metrics`)** measure origin-level process health: HTTP requests reaching the Go server, WebSocket terminal session concurrency, connection rejections (`connection_limit`, `origin`, `handshake`), session durations and disconnect causes (`client_disconnect`, `idle_timeout`, `server_shutdown`), PTY terminal byte throughput, and DuckDB snapshot publication/refresh latency and staleness.
 - **CDN / reverse-proxy analytics** (such as edge CDN or ingress logs configured in deployment infrastructure) measure edge traffic before it reaches `ntfuzz`: CDN cache hits on static assets, WAF/rate-limit blocks at the edge, TLS handshake versions, geographic/ASN distributions, and unique visitor estimates. Keep CDN configuration, collectors, dashboards, and retention policies in deployment infrastructure rather than inside `ntfuzz`.
 
----
-
-## Open Collaboration
-
-Contributions and feedback are welcome. Please adhere to our [Code of Conduct](./CODE_OF_CONDUCT.md) when engaging our community.
-
-- [GitHub Issues](https://github.com/NimbleTerminal/ntfuzz/issues)
-- [GitHub Pull Requests](https://github.com/NimbleTerminal/ntfuzz/pulls)
-
-## Acknowledgements
-
-Thanks to [DuckDB](https://duckdb.org/) and [`duckdb-go`](https://github.com/duckdb/duckdb-go), [Charm](https://charm.land) for [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Gloss](https://github.com/charmbracelet/lipgloss), [Ghostty](https://ghostty.org/), and the [`ntwebterm`](https://github.com/NimbleTerminal/ntwebterm), [`ntduckbox`](https://github.com/NimbleTerminal/ntduckbox), and [`ntcharts`](https://github.com/NimbleMarkets/ntcharts) libraries.
-
-## License
-
-Released under the [MIT License](./LICENSE). Part of the [Nimble Terminal](https://nimbleterminal.com) platform.
-
-Copyright (c) 2026 [Neomantra Corp](https://www.neomantra.com).
-
-----
-Made with :heart: and :fire: by the team behind [Nimble Terminal](https://nimbleterminal.com).
-
-
-
-### Runner outcomes and diagnostics
+## Run Outcomes & Diagnostics
 
 Package selection precedes all test flags: `go test ./subpackage -parallel=1
 -run=^FuzzName$ -fuzz=^FuzzName$ -fuzztime=3s -test.fuzzcachedir=PATH`.
@@ -356,34 +326,24 @@ automatic; viewers require a matching v3 snapshot. Upgrade the writer and viewer
 together and publish a new snapshot before starting the new viewer. Old viewers
 cannot refresh to v3 snapshots.
 
-### Deploying the subpackage runner repair (operator procedure)
+---
 
-This repair does not itself deploy or release anything.
+## Open Collaboration
 
-1. Run `task ci` and `NTFUZZ_E2E=1 task test-e2e`. Optionally run
-   `NTFUZZ_PROJECTS=/path/to/projects go test -v ./internal/orchestrator -run TestLocalRunnerRepresentativeProjects -count=1`
-   for disposable-copy, three-second Gloss, nthtml, and nttypeset campaigns.
-2. Stop the writer cleanly and back up its closed DuckDB database, corpus tree,
-   configuration, and current snapshot generation. Keep the previous binary.
-3. Install the reviewed binary for both writer and viewer. Start the writer with
-   its existing configuration and database; verify schema v3 and successful
-   publication, then restart the viewer against the new snapshot directory.
-   Use the service manager and paths configured on the host.
-4. Check `/api/status`, `/api/projects`, and `/api/targets`. Wait for **fresh**
-   runs of Gloss `FuzzReadText` (also review all 18 Gloss targets) and nthtml
-   subpackage targets. Query `/api/runs?target=TARGET_ID&limit=2` and require
-   timestamps after deployment, the deployed project revision, `status=ok`,
-   and real execution evidence/counts. A historical green row or a stale snapshot
-   is not acceptance. Check the root-package nttypeset control as well.
-5. Inspect new errors via run diagnostics and compare
-   `/api/crashes?open=true` with the pre-deployment inventory. Do not mark
-   historical failures or crashes fixed based on this runner repair. The reported
-   11 ntcanvas and 2 ntcharts3d open crashes require separate investigation.
-6. If rollback is necessary, stop the writer and restore the backed-up database
-   and matching snapshot/binaries together; do not point an old viewer at v3
-   snapshots. Preserve new run/crash evidence before restoring.
+Contributions and feedback are welcome. Please adhere to our [Code of Conduct](./CODE_OF_CONDUCT.md) when engaging our community.
 
-Local short campaigns validate selection and execution, not long-term target
-correctness or the production deployment. Truncated diagnostics can omit evidence;
-such runs may conservatively appear incomplete. Post-deployment confirmation is
-still required.
+- [GitHub Issues](https://github.com/NimbleTerminal/ntfuzz/issues)
+- [GitHub Pull Requests](https://github.com/NimbleTerminal/ntfuzz/pulls)
+
+## Acknowledgements
+
+Thanks to [DuckDB](https://duckdb.org/) and [`duckdb-go`](https://github.com/duckdb/duckdb-go), [Charm](https://charm.land) for [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Gloss](https://github.com/charmbracelet/lipgloss), [Ghostty](https://ghostty.org/), and the [`ntwebterm`](https://github.com/NimbleTerminal/ntwebterm), [`ntduckbox`](https://github.com/NimbleTerminal/ntduckbox), and [`ntcharts`](https://github.com/NimbleMarkets/ntcharts) libraries.
+
+## License
+
+Released under the [MIT License](./LICENSE). Part of the [Nimble Terminal](https://nimbleterminal.com) platform.
+
+Copyright (c) 2026 [Neomantra Corp](https://www.neomantra.com).
+
+----
+Made with :heart: and :fire: by the team behind [Nimble Terminal](https://nimbleterminal.com).

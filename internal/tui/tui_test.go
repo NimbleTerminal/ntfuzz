@@ -263,7 +263,15 @@ func TestRunDiagnosticView(t *testing.T) {
 	m.detailRuns = []api.Run{{Status: "missing_target", Diagnostic: "no fuzz tests to fuzz"}}
 	m.syncDetailWidgets()
 	view := m.renderDetailView()
-	if !strings.Contains(view, "no fuzz tests to fuzz") || !strings.Contains(view, "MISSING") {
+	if !strings.Contains(view, "no fuzz tests to fuzz") || !strings.Contains(view, "! MISS") {
 		t.Fatal(view)
+	}
+}
+
+func TestStatusBadgesFitStatusColumn(t *testing.T) {
+	for _, status := range []string{"ok", "crash", "missing_target", "incomplete", "canceled", "error", "fuzzing", "pending"} {
+		if got := lipgloss.Width(RenderStatusBadge(status, false)); got != 7 {
+			t.Fatalf("badge for %q is %d columns wide, want 7", status, got)
+		}
 	}
 }

@@ -763,7 +763,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 			MAX(v.last_started) AS last_run_at,
 			COALESCE(AVG(CASE WHEN v.execs_per_sec > 0 THEN v.execs_per_sec END), 0.0) AS avg_execs_per_sec,
 			COALESCE(AVG(CASE WHEN v.coverage_pct > 0 THEN v.coverage_pct END), 0.0) AS avg_coverage_pct,
-			COALESCE(SUM(CASE WHEN v.status NOT IN ('ok', 'pending') THEN 1 ELSE 0 END), 0) AS err_targets,
+			COALESCE(SUM(CASE WHEN v.status NOT IN ('ok', 'pending', 'canceled') THEN 1 ELSE 0 END), 0) AS err_targets,
 			COALESCE(SUM(CASE WHEN v.status = 'ok' THEN 1 ELSE 0 END), 0) AS ok_targets
 		FROM projects p
 		LEFT JOIN latest_target_status v ON v.project_id = p.id
@@ -1075,7 +1075,7 @@ func (s *Store) GetFleetStats(ctx context.Context) (FleetStats, error) {
 	).Scan(&stats.RunsLast24h, &stats.ExecsLast24h, &stats.AvgExecsSec); err != nil {
 		return stats, err
 	}
-	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM latest_target_status WHERE status NOT IN ('ok', 'pending')`).Scan(&stats.FailedTargets); err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM latest_target_status WHERE status NOT IN ('ok', 'pending', 'canceled')`).Scan(&stats.FailedTargets); err != nil {
 		return stats, err
 	}
 	stats.SchemaVersion, _ = s.schemaVersionLocked(ctx)

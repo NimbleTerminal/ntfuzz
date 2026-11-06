@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -142,5 +144,70 @@ func TestLocalRunnerRepresentativeProjects(t *testing.T) {
 				t.Fatalf("campaign failed: %v", err)
 			}
 		})
+	}
+}
+
+func TestBoundedOutputPreservesSmallOutputVerbatim(t *testing.T) {
+	var b boundedOutput
+	in := strings.Repeat("x", 8190) + "\n--- FAIL: FuzzX (0.1s)\nPASS\n"
+	_, _ = b.Write([]byte(in))
+	if got := b.String(); got != in {
+		t.Fatalf("expected verbatim output when nothing was dropped, got %q", got)
+	}
+}
+
+func TestBoundedOutputCutsOnLineBoundaries(t *testing.T) {
+	var b boundedOutput
+	var sb strings.Builder
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(&sb, "line%05d\n", i)
+	}
+	_, _ = b.Write([]byte(sb.String()))
+	out := b.String()
+	if !strings.Contains(out, "[diagnostic tail") {
+		t.Fatal("expected omission marker when bytes were dropped")
+	}
+	full := regexp.MustCompile(`^line\d{5}$`)
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if strings.HasPrefix(line, "[diagnostic tail") {
+			continue
+		}
+		if !full.MatchString(line) {
+			t.Fatalf("partial line in bounded output: %q", line)
+		}
+	}
+}
+
+func TestInfraPhrasesInTargetOutputStillCrash(t *testing.T) {
+	out := "fuzz: elapsed: 1s, execs: 10 (10/sec)\n" +
+		"--- FAIL: FuzzDecode (0.10s)\n" +
+		"    --- FAIL: FuzzDecode (0.00s)\n" +
+		"        panic: failed to unmarshal header: index out of range\n" +
+		"FAIL\n"
+	r := ParseFuzzOutput(out, time.Now(), 1, errors.New("exit 1"))
+	if r.Status != "crash" || len(r.CrashRecords) != 1 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestMissingTargetPhraseInTargetOutputStillCrash(t *testing.T) {
+	out := "fuzz: elapsed: 1s, execs: 10 (10/sec)\n" +
+		"--- FAIL: FuzzRunner (1.00s)\n" +
+		"    runner_test.go:9: no tests to run\n" +
+		"    Failing input written to testdata/fuzz/FuzzRunner/abc\n" +
+		"FAIL\n"
+	r := ParseFuzzOutput(out, time.Now(), 1, errors.New("exit 1"))
+	if r.Status != "crash" || len(r.CrashRecords) != 1 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestDeadlineKeepsWrittenCrash(t *testing.T) {
+	out := "fuzz: elapsed: 3s, execs: 10 (3/sec)\n" +
+		"--- FAIL: FuzzX (3.00s)\n" +
+		"    Failing input written to testdata/fuzz/FuzzX/abc\n"
+	r := ParseFuzzOutput(out, time.Now(), 3, context.DeadlineExceeded)
+	if r.Status != "crash" || len(r.CrashRecords) != 1 || r.CrashRecords[0].MinimizedInput != "testdata/fuzz/FuzzX/abc" {
+		t.Fatalf("%+v", r)
 	}
 }

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -76,6 +77,12 @@ var (
 	reFailingInput = regexp.MustCompile(`Failing input written to\s+(\S+)`)
 	// Matches: coverage: 76.5% of statements
 	reCoverage = regexp.MustCompile(`coverage:\s*(\d+(?:\.\d+)?)%\s*of statements`)
+
+	// Coordinator-level lines only: a standalone PASS and the top-level fuzz FAIL header.
+	rePassLine = regexp.MustCompile(`(?m)^PASS\r?$`)
+	reFailFuzz = regexp.MustCompile(`(?m)^--- FAIL: Fuzz\w+`)
+	// Go's own "nothing to run" diagnostics, anchored so target output cannot spoof them.
+	reMissingTarget = regexp.MustCompile(`(?m)^(?:testing: warning: no (?:fuzz )?tests to (?:fuzz|run)|\?\s+\S+\s+\[no test files\]|ok\s+\S+\s+[\d.]+s\s+\[no tests to run\])\s*$`)
 
 	reFileLine     = regexp.MustCompile(`(?m)([A-Za-z0-9_./\\-]+\.go):\d+(\s*\+0x[0-9a-fA-F]+)?`)
 	reHexAddr      = regexp.MustCompile(`0x[0-9a-fA-F]+`)
@@ -292,6 +299,12 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 	}
 
 	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		if errors.Is(runErr, context.DeadlineExceeded) && len(res.CrashRecords) > 0 {
+			// The fuzzer already wrote a failing input before the runner deadline fired.
+			res.Crashes = len(res.CrashRecords)
+			res.Status = "crash"
+			return res
+		}
 		res.Status = "canceled"
 		if errors.Is(runErr, context.DeadlineExceeded) {
 			res.Status = "error"
@@ -299,12 +312,12 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 		res.CrashRecords = nil
 		return res
 	}
-	if strings.Contains(output, "no fuzz tests to fuzz") || strings.Contains(output, "[no test files]") || strings.Contains(output, "no tests to run") {
+	if reMissingTarget.MatchString(output) {
 		res.Status = "missing_target"
 		res.CrashRecords = nil
 		return res
 	}
-	if runErr == nil && reFuzzProgress.MatchString(output) && regexp.MustCompile(`(?m)^PASS\r?$`).MatchString(output) {
+	if runErr == nil && reFuzzProgress.MatchString(output) && rePassLine.MatchString(output) {
 		res.Status = "ok"
 	}
 	if len(res.CrashRecords) > 0 {
@@ -314,7 +327,7 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 	}
 
 	if runErr != nil {
-		if regexp.MustCompile(`(?m)^--- FAIL: Fuzz\w+`).MatchString(output) && !strings.Contains(output, "failed to start") && !strings.Contains(output, "resource temporarily unavailable") && !strings.Contains(output, "failed to unmarshal") && !strings.Contains(output, "mismatched types in corpus entry") {
+		if reFailFuzz.MatchString(output) && !hasCoordinatorInfraFailure(output) {
 			stack := extractCrashStack(output)
 			fp := FingerprintStack(stack)
 			sum := sha256.Sum256([]byte(stack))
@@ -333,6 +346,33 @@ func ParseFuzzOutput(output string, started time.Time, durationSec float64, runE
 	}
 
 	return res
+}
+
+var coordinatorInfraPhrases = []string{
+	"failed to start",
+	"resource temporarily unavailable",
+	"failed to unmarshal",
+	"mismatched types in corpus entry",
+}
+
+// hasCoordinatorInfraFailure reports whether the fuzz coordinator itself failed (worker startup,
+// corpus decoding) rather than the target. Only lines at the coordinator's own indentation count;
+// nested subtest output and panic messages from the target are ignored so their text cannot
+// downgrade a genuine crash to an infrastructure error.
+func hasCoordinatorInfraFailure(output string) bool {
+	for line := range strings.SplitSeq(output, "\n") {
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		trimmed := strings.TrimSpace(line)
+		if indent > 4 || strings.Contains(trimmed, "panic:") {
+			continue
+		}
+		for _, phrase := range coordinatorInfraPhrases {
+			if strings.Contains(trimmed, phrase) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FingerprintStack normalizes a crash stack by stripping directory paths, line numbers,
@@ -558,10 +598,14 @@ func sanitizePathSegment(s string) string {
 
 // boundedOutput retains the beginning and end, bounding memory even for noisy targets.
 // os/exec serializes writes when Stdout and Stderr share this writer.
-type boundedOutput struct{ head, tail []byte }
+type boundedOutput struct {
+	head, tail []byte
+	total      int
+}
 
 func (b *boundedOutput) Write(p []byte) (int, error) {
 	n := len(p)
+	b.total += n
 	if len(b.head) < 8192 {
 		k := min(8192-len(b.head), len(p))
 		b.head = append(b.head, p[:k]...)
@@ -576,9 +620,35 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 	}
 	return n, nil
 }
+
+// String returns the captured output verbatim when nothing was dropped. Otherwise the head is
+// cut back to its last complete line and the tail forward to its first complete line, so an
+// omission marker never splits a line that the anchored output parsers need to see intact.
 func (b *boundedOutput) String() string {
-	return string(b.head) + "\n[diagnostic tail]\n" + string(b.tail)
+	dropped := b.total - len(b.head) - len(b.tail)
+	if dropped <= 0 {
+		return string(b.head) + string(b.tail)
+	}
+	head := b.head
+	if i := bytes.LastIndexByte(head, '\n'); i >= 0 {
+		dropped += len(head) - (i + 1)
+		head = head[:i+1]
+	}
+	tail := b.tail
+	if i := bytes.IndexByte(tail, '\n'); i >= 0 {
+		dropped += i + 1
+		tail = tail[i+1:]
+	}
+	return string(head) + fmt.Sprintf("[diagnostic tail: %d bytes omitted]\n", dropped) + string(tail)
 }
+
+var userHomeDir = func() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
+}()
 
 var diagnosticSecret = regexp.MustCompile(`(?i)(token|password|secret|authorization|api[_-]?key)([=: ]+)[^\s]+`)
 var diagnosticURL = regexp.MustCompile(`(https?://)[^/\s@]+@`)
@@ -589,8 +659,8 @@ func sanitizeDiagnostic(s string, paths ...string) string {
 			s = strings.ReplaceAll(s, path, "<path>")
 		}
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		s = strings.ReplaceAll(s, home, "<home>")
+	if userHomeDir != "" {
+		s = strings.ReplaceAll(s, userHomeDir, "<home>")
 	}
 	s = diagnosticURL.ReplaceAllString(s, "${1}<redacted>@")
 	s = diagnosticSecret.ReplaceAllString(s, "${1}${2}<redacted>")

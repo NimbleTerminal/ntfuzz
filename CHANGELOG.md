@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Fix bounded diagnostic capture: small outputs are kept verbatim and the omission marker is only inserted on line boundaries, so `PASS` and `--- FAIL` lines are never split.
+- Classify crashes correctly when target output contains coordinator phrases such as "failed to unmarshal" or "no tests to run"; infrastructure and missing-target detection are anchored on Go's own lines.
+- Keep crash records whose failing input was written before the runner deadline fired instead of discarding them as errors.
+- Canceled runs no longer count as failed targets in fleet health or project status.
+- Shorten the incomplete, missing, and canceled TUI badges to fit the 7-column status column.
+- README: correct schema version, remove the duplicate license section, move run-outcome documentation into the main body, and drop internal deployment notes.
 - Fix subpackage fuzz selection by placing the package before forwarded test flags; apply package-first ordering to coverage replay.
 - Require fuzz coordinator progress and PASS before reporting success; distinguish missing targets, incomplete runs, cancellation, infrastructure errors, and fuzz crashes.
 - Bound failed-run diagnostics, redact common sensitive values, persist them in schema v3, and expose them in the runs API and target-detail TUI, including snapshots.
