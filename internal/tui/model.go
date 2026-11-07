@@ -165,6 +165,7 @@ type Model struct {
 	covSparkline    sparkline.Model
 
 	// Stats / Canned Queries state
+	revisionPage   int
 	statsQueryIdx  int
 	statsWindowIdx int
 	statsData      api.StatsResponse
@@ -525,6 +526,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if m.mode == ViewStats && m.currentStatsQuery().ID == api.StatsQueryRevisions {
+			switch msg.String() {
+			case "[":
+				m.revisionPage = max(0, m.revisionPage-1)
+				return m, nil
+			case "]":
+				m.revisionPage = min(len(m.statsData.Revisions)-1, m.revisionPage+1)
+				m.revisionPage = max(0, m.revisionPage)
+				return m, nil
+			}
+		}
+
 		km := m.keyMap()
 		switch {
 		case key.Matches(msg, km.Quit):
@@ -558,6 +571,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.fetchStatsCmd()
 
 		case key.Matches(msg, km.Window):
+			m.revisionPage = 0
 			if m.mode == ViewStats {
 				m.statsWindowIdx = (m.statsWindowIdx + 1) % len(StatsWindows)
 				return m, m.fetchStatsCmd()
@@ -612,6 +626,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, km.Project):
+			m.revisionPage = 0
 			if m.mode == ViewFleet || m.mode == ViewStats {
 				if len(m.projects) > 0 {
 					m.projectIdx = (m.projectIdx + 1) % (len(m.projects) + 1)

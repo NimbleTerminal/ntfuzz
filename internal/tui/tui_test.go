@@ -639,3 +639,29 @@ func TestStatsCannedQueriesViewAndNavigation(t *testing.T) {
 		t.Fatalf("expected ViewFleet after pressing 'g' in ViewStats, got %v", m.mode)
 	}
 }
+
+func TestRevisionTableAndPagination(t *testing.T) {
+	m := Model{width: 120, height: 40, mode: ViewStats, statsQueryIdx: 3}
+	now := time.Now().UTC()
+	m.statsData = api.StatsResponse{Query: api.StatsQueryRevisions, Window: "24h", Buckets: []api.StatsBucket{{BucketStart: now, DetectedRevisions: 2, TestedRevisions: 1}}}
+	for i := 0; i < 20; i++ {
+		m.statsData.Revisions = append(m.statsData.Revisions, api.Revision{Project: fmt.Sprintf("repo%d", i), GitSHA: "abcdef123456", PreviousSHA: "000000000000", DetectedAt: now, OKRuns: 2, ReplayPassed: 1, ReplayBlocked: 1})
+	}
+	for _, width := range []int{60, 120} {
+		m.width = width
+		rendered := m.renderRevisionStats(width, 20)
+		if !strings.Contains(rendered, "repo0") || !strings.Contains(rendered, "REPLAY") || !strings.Contains(rendered, "Page 1/") {
+			t.Fatalf("missing revision table: %s", rendered)
+		}
+		for _, line := range strings.Split(rendered, "\n") {
+			if lipgloss.Width(line) > width {
+				t.Fatalf("overflow at width %d: %s", width, line)
+			}
+		}
+	}
+	next, _ := m.Update(tea.KeyPressMsg{Code: ']', Text: "]"})
+	m = next.(Model)
+	if m.revisionPage != 1 {
+		t.Fatal("page did not advance")
+	}
+}

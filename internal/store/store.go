@@ -15,7 +15,7 @@ import (
 )
 
 // CurrentSchemaVersion tracks the DuckDB schema version.
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 // ErrNotFound is returned when a requested record does not exist.
 var ErrNotFound = errors.New("record not found")
@@ -164,6 +164,7 @@ const (
 	StatsQueryThroughput = "throughput"
 	StatsQueryCoverage   = "coverage"
 	StatsQueryOutcomes   = "outcomes"
+	StatsQueryRevisions  = "revisions"
 )
 
 // Supported time window identifiers for canned stats queries.
@@ -180,25 +181,28 @@ var ErrInvalidStatsParam = errors.New("invalid stats parameter")
 
 // StatsBucket represents a single time-bucketed aggregation over fuzz runs.
 type StatsBucket struct {
-	BucketStart    time.Time `json:"bucket_start"`
-	Runs           int       `json:"runs"`
-	Execs          int64     `json:"execs"`
-	DurationSec    float64   `json:"duration_sec"`
-	AvgExecsPerSec float64   `json:"avg_execs_per_sec"`
-	PeakExecsSec   float64   `json:"peak_execs_per_sec"`
-	AvgCoveragePct float64   `json:"avg_coverage_pct"`
-	MaxCoveragePct float64   `json:"max_coverage_pct"`
-	NewInteresting int       `json:"new_interesting"`
-	CorpusCount    int       `json:"corpus_count"`
-	OKRuns         int       `json:"ok_runs"`
-	CrashRuns      int       `json:"crash_runs"`
-	ErrorRuns      int       `json:"error_runs"`
-	IncompleteRuns int       `json:"incomplete_runs"`
-	CanceledRuns   int       `json:"canceled_runs"`
+	DetectedRevisions int       `json:"detected_revisions"`
+	TestedRevisions   int       `json:"tested_revisions"`
+	BucketStart       time.Time `json:"bucket_start"`
+	Runs              int       `json:"runs"`
+	Execs             int64     `json:"execs"`
+	DurationSec       float64   `json:"duration_sec"`
+	AvgExecsPerSec    float64   `json:"avg_execs_per_sec"`
+	PeakExecsSec      float64   `json:"peak_execs_per_sec"`
+	AvgCoveragePct    float64   `json:"avg_coverage_pct"`
+	MaxCoveragePct    float64   `json:"max_coverage_pct"`
+	NewInteresting    int       `json:"new_interesting"`
+	CorpusCount       int       `json:"corpus_count"`
+	OKRuns            int       `json:"ok_runs"`
+	CrashRuns         int       `json:"crash_runs"`
+	ErrorRuns         int       `json:"error_runs"`
+	IncompleteRuns    int       `json:"incomplete_runs"`
+	CanceledRuns      int       `json:"canceled_runs"`
 }
 
 // StatsSeries holds time-bucketed metrics and window summary totals for a canned stats query.
 type StatsSeries struct {
+	Revisions      []Revision    `json:"revisions,omitempty"`
 	Query          string        `json:"query"`
 	Window         string        `json:"window"`
 	BucketSeconds  int           `json:"bucket_seconds"`
@@ -378,6 +382,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 
 	migrations = append(migrations, migration{version: 3, stmts: []string{`ALTER TABLE runs ADD COLUMN IF NOT EXISTS diagnostic VARCHAR DEFAULT '';`}})
 	now := time.Now().UTC()
+	migrations = append(migrations, migration{version: 4, stmts: []string{revisionSchema,
+		`INSERT INTO revisions SELECT id,git_sha,'',(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),true FROM projects WHERE COALESCE(git_sha,'')<>'' ON CONFLICT DO NOTHING`,
+		`INSERT INTO revision_targets SELECT t.project_id,r.git_sha,r.target_id,MIN(r.started),COUNT(*),COUNT(*) FILTER(WHERE r.status='ok'),COUNT(*) FILTER(WHERE r.status='crash'),COUNT(*) FILTER(WHERE r.status NOT IN ('ok','crash')) FROM runs r JOIN targets t ON t.id=r.target_id WHERE COALESCE(r.git_sha,'')<>'' AND NOT COALESCE(r.dirty,false) GROUP BY t.project_id,r.git_sha,r.target_id ON CONFLICT DO NOTHING`,
+	}})
+
 	for _, m := range migrations {
 		if m.version <= currentVersion {
 			continue
@@ -509,7 +518,7 @@ func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, er
 		if err != nil {
 			return 0, fmt.Errorf("insert project %q: %w", in.Name, err)
 		}
-		return id, nil
+		return id, s.recordRevisionLocked(ctx, id, in)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("query project %q: %w", in.Name, err)
@@ -537,7 +546,7 @@ func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, er
 	if err != nil {
 		return 0, fmt.Errorf("update project %q: %w", in.Name, err)
 	}
-	return id, nil
+	return id, s.recordRevisionLocked(ctx, id, in)
 }
 
 // UpsertTarget ensures a target (project_id, package, name) exists and is marked active, returning its ID.
@@ -645,8 +654,13 @@ func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 		r.Worker = "local-0"
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
 	var id int64
-	err := s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`INSERT INTO runs (
 			target_id, started, duration_sec, execs, execs_per_sec,
 			new_interesting, corpus_count, crashes, coverage_pct, status, worker,
@@ -659,7 +673,17 @@ func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("insert run for target %d: %w", r.TargetID, err)
 	}
-	return id, nil
+	if r.GitSHA != "" && !r.Dirty {
+		_, err = tx.ExecContext(ctx, `INSERT INTO revision_targets SELECT project_id, ?, id, ?, 1, ?, ?, ? FROM targets WHERE id=?
+ ON CONFLICT(project_id,git_sha,target_id) DO UPDATE SET
+ first_run=LEAST(revision_targets.first_run,excluded.first_run),runs=revision_targets.runs+1,
+ ok_runs=revision_targets.ok_runs+excluded.ok_runs,crash_runs=revision_targets.crash_runs+excluded.crash_runs,error_runs=revision_targets.error_runs+excluded.error_runs`,
+			r.GitSHA, started, boolCount(r.Status == "ok"), boolCount(r.Status == "crash"), boolCount(r.Status != "ok" && r.Status != "crash"), r.TargetID)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return id, tx.Commit()
 }
 
 // RecordCrash inserts a new crash or updates last_seen if the same (target_id, input_hash)
@@ -1152,8 +1176,10 @@ func ParseStatsQuery(raw string) (string, error) {
 		return StatsQueryCoverage, nil
 	case StatsQueryOutcomes:
 		return StatsQueryOutcomes, nil
+	case StatsQueryRevisions:
+		return StatsQueryRevisions, nil
 	default:
-		return "", fmt.Errorf("%w: unknown query %q (expected throughput, coverage, or outcomes)", ErrInvalidStatsParam, raw)
+		return "", fmt.Errorf("%w: unknown query %q (expected throughput, coverage, outcomes, or revisions)", ErrInvalidStatsParam, raw)
 	}
 }
 
@@ -1183,6 +1209,12 @@ func (s *Store) GetStats(ctx context.Context, queryName, windowName, projectFilt
 	qName, err := ParseStatsQuery(queryName)
 	if err != nil {
 		return StatsSeries{}, err
+	}
+	if qName == StatsQueryRevisions {
+		if targetFilter != "" {
+			return StatsSeries{}, fmt.Errorf("%w: revisions use project filtering", ErrInvalidStatsParam)
+		}
+		return s.GetRevisionStats(ctx, windowName, projectFilter)
 	}
 	win, bucketSec, lookbackSQL, bucketSQL, err := ParseStatsWindow(windowName)
 	if err != nil {
@@ -1311,4 +1343,11 @@ func (s *Store) GetStats(ctx context.Context, queryName, windowName, projectFilt
 		out.AvgCoveragePct = covWeightedSum / float64(covWeight)
 	}
 	return out, nil
+}
+
+func boolCount(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

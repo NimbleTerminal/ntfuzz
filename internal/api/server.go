@@ -75,6 +75,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/stats", s.handleStats)
 	s.mux.HandleFunc("GET /api/stats/{query}", s.handleStats)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
+	s.mux.HandleFunc("GET /api/crash-replays", s.handleCrashReplays)
 }
 
 // ServeHTTP implements http.Handler.
@@ -299,4 +300,13 @@ func writeError(w http.ResponseWriter, code int, err error) {
 		return
 	}
 	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+func (s *Server) handleCrashReplays(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.store.ListCrashReplays(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
 }

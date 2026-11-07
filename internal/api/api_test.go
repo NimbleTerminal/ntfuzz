@@ -219,3 +219,35 @@ func TestAPIServerAndClient(t *testing.T) {
 		t.Fatalf("expected 400 for invalid stats query, got %d", badStatsResp.StatusCode)
 	}
 }
+
+func TestRevisionAndReplayEndpoints(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "revisions.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	if _, err = st.SyncProject(ctx, store.ProjectSyncInput{Name: "repo", Repo: "local", GitSHA: "abc", SyncedAt: &now}); err != nil {
+		t.Fatal(err)
+	}
+	for _, handler := range []http.Handler{NewServer(st, nil), NewSnapshotServer(st, store.Snapshot{PublishedAt: now})} {
+		for _, path := range []string{"/api/stats/revisions?window=24h", "/api/crash-replays"} {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
+			}
+			if strings.Contains(path, "revisions") && !strings.Contains(rec.Body.String(), `"baseline":true`) {
+				t.Fatalf("missing baseline: %s", rec.Body.String())
+			}
+		}
+		for _, path := range []string{"/api/stats/revisions?window=bogus", "/api/stats/revisions?target=1"} {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+			if rec.Code != 400 {
+				t.Fatalf("invalid stats query accepted: %s", path)
+			}
+		}
+	}
+}

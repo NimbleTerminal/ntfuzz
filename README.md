@@ -31,7 +31,7 @@
   - `GET /api/crashes?open=true` — open (or all) crashes with stack traces, stack fingerprints, and durable corpus paths
   - `POST /api/crashes/{id}/fix` — mark a crash fixed (and optionally attach `issue_url`)
   - `GET /api/coverage/history?target=...` — chronological coverage & corpus growth series
-  - `GET /api/stats/{query}?window=24h&project=...` — canned time-bucketed analytical queries (`throughput`, `coverage`, `outcomes`) over `1h`, `6h`, `24h`, `7d`, or `14d`
+  - `GET /api/stats/{query}?window=24h&project=...` — canned time-bucketed analytical queries (`throughput`, `coverage`, `outcomes`, `revisions`) over `1h`, `6h`, `24h`, `7d`, or `14d`
   - `GET /api/status` — fleet health, 24h run counts, schema version, and active worker jobs
 - **Shared Bubble Tea TUI + Booba Browser Bridge**:
   - The TUI talks strictly to the HTTP API DTOs in `internal/api` (never imports `internal/store` or opens DuckDB directly).
@@ -126,7 +126,7 @@ projects:
 | `enter` | Target detail | Open selected target's run history, `ntcharts` coverage sparkline, and crashes |
 | `esc` / `backspace` | Back to fleet | Return to the main fleet overview |
 | `p` / `tab` | Filter project | Cycle through projects (`All Projects` → project 1 → ...) |
-| `g` | Stats graphs | Toggle the canned time-series `ntcharts` view (`throughput`, `coverage`, `outcomes`) |
+| `g` | Stats graphs | Toggle the canned time-series `ntcharts` view (`throughput`, `coverage`, `outcomes`, `revisions`) |
 | `w` | Time window | Cycle time window (`1h` → `6h` → `24h` → `7d` → `14d`) in Stats view |
 | `c` | Open crashes | Toggle the fleet-wide open crashes view |
 | `x` | Mark crash fixed | Mark the selected open crash as fixed (in Crashes view) |
@@ -372,3 +372,35 @@ Copyright (c) 2026 [Neomantra Corp](https://www.neomantra.com).
 
 ----
 Made with :heart: and :fire: by the team behind [Nimble Terminal](https://nimbleterminal.com).
+
+### Revision detection and crash recovery
+
+Open **Graphs** (`g`), then select **Revisions & Recovery** with the up/down keys.
+The graph groups newly observed revisions by detection time, split into awaiting
+fuzzing and fuzzed (at least one clean-checkout run completed with `ok` or `crash`).
+The table shows previous/current SHAs, observation and last-sync times, run outcomes,
+and saved-input replay counts: passed / failed / blocked / pending. Use `[` / `]`
+to page, `p` to filter projects, and `w` to select a time window.
+
+Remote repositories are pulled with `git pull --ff-only` at the start of each
+fuzzing round. This observes branch heads, not every intermediate commit in a push.
+First observations, including existing checkouts at upgrade, are labeled **baseline**
+and excluded from the new-revision graph. Revision observations and aggregate run
+counts survive pruning of raw runs. Counts exclude dirty checkouts; historical
+revisions show the project's current sync health and current active-target count.
+
+Before fuzzing a target on a different SHA, ntfuzz replays each known crash's saved
+input in a disposable module copy, including previously closed crashes. A named
+reproducer subtest must execute and pass before the crash is marked resolved;
+a normal successful fuzz run alone never clears old failures. The original crash
+record and failing SHA remain available. A subsequent recurrence reopens the crash.
+A replay pass means **this saved input no longer reproduces**, not proof that every
+variant of the bug is fixed.
+
+Missing or changed input files, skipped/missing tests, dirty checkouts, build errors,
+and timeouts remain **blocked**, without closing crashes. Removed targets are also
+blocked. Blocked checks retry after an hour; completed checks run once per saved
+input and revision. Replays have a 45-second timeout and use the existing worker
+and module scheduling limits. Replay details are available at `GET /api/crash-replays`;
+revision progress is at `GET /api/stats/revisions?window=24h&project=...`.
+Both endpoints are also available in the read-only snapshot viewer.

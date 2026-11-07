@@ -194,6 +194,27 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 			continue
 		}
 
+		// Removed/renamed targets cannot verify old inputs; keep their crashes open.
+		oldCrashes, listErr := o.store.ListCrashes(ctx, false, "")
+		if listErr != nil {
+			o.logger.Warn("list missing-target replays failed", "err", listErr)
+		}
+		for _, c := range oldCrashes {
+			if c.ProjectName != proj.Name || c.GitSHA == checkout.GitSHA {
+				continue
+			}
+			if _, present := reconciledIDs[store.TargetKey{Package: c.Package, Name: c.TargetName}]; present {
+				continue
+			}
+			needed, e := o.store.NeedsReplay(ctx, c, checkout.GitSHA)
+			if e != nil || !needed {
+				continue
+			}
+			if e = o.store.RecordReplay(ctx, c, store.CrashReplay{GitSHA: checkout.GitSHA, CheckedAt: time.Now().UTC(), Outcome: "blocked", Diagnostic: "Target is no longer discovered on this revision"}); e != nil {
+				o.logger.Warn("record missing-target replay failed", "err", e)
+			}
+		}
+
 		o.logger.Info("synced project",
 			"component", "orchestrator",
 			"project", proj.Name,
@@ -403,6 +424,7 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 		"fuzztime", fuzzTime.String(),
 	)
 
+	o.replayCrashes(ctx, item, job)
 	res, err := o.runner.RunTarget(ctx, job)
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		res.Status = "canceled"

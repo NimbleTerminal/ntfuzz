@@ -39,6 +39,7 @@ var CannedQueries = []CannedQuery{
 		Title:    "Run Outcomes Over Time",
 		Subtitle: "Completed runs per time bucket by outcome (OK, Crash, Error/Incomplete, Canceled)",
 	},
+	{ID: api.StatsQueryRevisions, Title: "Revisions & Recovery", Subtitle: "Observed revisions, fuzz progress, and saved-crash verification"},
 }
 
 // StatsWindows lists the supported lookback time windows in cycling order.
@@ -128,6 +129,10 @@ func (m Model) renderStatsView() string {
 	chartW := max(12, contentWidth)
 
 	stats := m.statsData
+	if activeQ.ID == api.StatsQueryRevisions {
+		b.WriteString(m.renderRevisionStats(contentWidth, max(8, m.height-reserved-8)))
+		return panelStyle.Width(max(1, m.width-2)).Render(b.String())
+	}
 	if len(stats.Buckets) == 0 {
 		msg := "No fuzz run history in the selected window (" + activeWin + ")."
 		if m.loading {
@@ -448,4 +453,77 @@ func clampLinesWidth(s string, maxWidth int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderRevisionStats keeps the chart and a paged table together at terminal widths.
+func (m Model) renderRevisionStats(width, height int) string {
+	var b strings.Builder
+	stats := m.statsData
+	chartHeight := max(4, min(8, height/3))
+	bars := make([]barchart.BarData, 0, len(stats.Buckets))
+	for _, v := range stats.Buckets {
+		label := v.BucketStart.UTC().Format("15:04")
+		if stats.Window == "7d" || stats.Window == "14d" {
+			label = v.BucketStart.UTC().Format("01/02")
+		}
+		bars = append(bars, barchart.BarData{Label: label, Values: []barchart.BarValue{
+			{Name: "Awaiting fuzz", Value: float64(v.DetectedRevisions - v.TestedRevisions), Style: statusRunningStyle},
+			{Name: "Fuzzed", Value: float64(v.TestedRevisions), Style: statusOKStyle},
+		}})
+	}
+	chart := barchart.New(max(12, width), chartHeight, barchart.WithStyles(subtleTextStyle, subtleTextStyle), barchart.WithDataSet(bars))
+	chart.Draw()
+	b.WriteString(clampLinesWidth(chart.View(), width) + "\n")
+	b.WriteString(ansi.Truncate("Detected revisions: awaiting fuzz (blue) + fuzzed (green); baselines excluded", width, "…") + "\n")
+	if len(stats.Revisions) == 0 {
+		b.WriteString("No revision observations in this window.\n")
+		return b.String()
+	}
+	// Two lines per record keep detection and sync times visible even on narrow screens.
+	pageSize := max(1, (height-chartHeight-5)/2)
+	pages := (len(stats.Revisions) + pageSize - 1) / pageSize
+	page := min(m.revisionPage, pages-1)
+	b.WriteString(ansi.Truncate(fmt.Sprintf("REPO / REVISION          RUNS ok/crash/error    REPLAY pass/fail/blocked/pending"), width, "…") + "\n")
+	start := page * pageSize
+	end := min(start+pageSize, len(stats.Revisions))
+	for _, v := range stats.Revisions[start:end] {
+		kind := "update"
+		if v.Baseline {
+			kind = "baseline"
+		}
+		if v.Current {
+			kind += " current"
+		}
+		sha := v.GitSHA
+		if len(sha) > 12 {
+			sha = sha[:12]
+		}
+		prev := v.PreviousSHA
+		if len(prev) > 8 {
+			prev = prev[:8]
+		}
+		if prev != "" {
+			sha = prev + "→" + sha
+		}
+		line := fmt.Sprintf("%-12s %-22s %d/%d/%d    %d/%d/%d/%d", v.Project, sha, v.OKRuns, v.CrashRuns, v.ErrorRuns, v.ReplayPassed, v.ReplayFailed, v.ReplayBlocked, v.ReplayPending)
+		b.WriteString(ansi.Truncate(line, width, "…") + "\n")
+		sync := "never"
+		if v.LastSynced != nil {
+			sync = v.LastSynced.UTC().Format("01-02 15:04")
+		}
+		state := "awaiting fuzzing"
+		if v.OKRuns+v.CrashRuns > 0 {
+			state = "fuzzed"
+		}
+		if v.ErrorRuns > 0 && v.OKRuns+v.CrashRuns == 0 {
+			state = "fuzz blocked"
+		}
+		if v.SyncError != "" {
+			state = "SYNC ERROR: " + v.SyncError
+		}
+		detail := fmt.Sprintf("  %s UTC • %s • sync %s • %s • %d targets tested", v.DetectedAt.UTC().Format("01-02 15:04"), kind, sync, state, v.TestedTargets)
+		b.WriteString(subtleTextStyle.Render(ansi.Truncate(detail, width, "…")) + "\n")
+	}
+	b.WriteString(ansi.Truncate(fmt.Sprintf("Page %d/%d [ / ] • p: project • w: window • pass = saved input no longer reproduces", page+1, pages), width, "…"))
+	return b.String()
 }

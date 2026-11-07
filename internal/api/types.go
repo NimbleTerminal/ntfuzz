@@ -273,6 +273,7 @@ const (
 	StatsQueryThroughput = store.StatsQueryThroughput
 	StatsQueryCoverage   = store.StatsQueryCoverage
 	StatsQueryOutcomes   = store.StatsQueryOutcomes
+	StatsQueryRevisions  = store.StatsQueryRevisions
 )
 
 // Supported time window identifiers for GET /api/stats and GET /api/stats/{query}.
@@ -286,26 +287,28 @@ const (
 
 // StatsBucket is the JSON wire representation of a single time-bucketed stats point.
 type StatsBucket struct {
-	BucketStart    time.Time `json:"bucket_start"`
-	Runs           int       `json:"runs"`
-	Execs          int64     `json:"execs"`
-	DurationSec    float64   `json:"duration_sec"`
-	AvgExecsPerSec float64   `json:"avg_execs_per_sec"`
-	PeakExecsSec   float64   `json:"peak_execs_per_sec"`
-	AvgCoveragePct float64   `json:"avg_coverage_pct"`
-	MaxCoveragePct float64   `json:"max_coverage_pct"`
-	NewInteresting int       `json:"new_interesting"`
-	CorpusCount    int       `json:"corpus_count"`
-	OKRuns         int       `json:"ok_runs"`
-	CrashRuns      int       `json:"crash_runs"`
-	ErrorRuns      int       `json:"error_runs"`
-	IncompleteRuns int       `json:"incomplete_runs"`
-	CanceledRuns   int       `json:"canceled_runs"`
+	DetectedRevisions int       `json:"detected_revisions"`
+	TestedRevisions   int       `json:"tested_revisions"`
+	BucketStart       time.Time `json:"bucket_start"`
+	Runs              int       `json:"runs"`
+	Execs             int64     `json:"execs"`
+	DurationSec       float64   `json:"duration_sec"`
+	AvgExecsPerSec    float64   `json:"avg_execs_per_sec"`
+	PeakExecsSec      float64   `json:"peak_execs_per_sec"`
+	AvgCoveragePct    float64   `json:"avg_coverage_pct"`
+	MaxCoveragePct    float64   `json:"max_coverage_pct"`
+	NewInteresting    int       `json:"new_interesting"`
+	CorpusCount       int       `json:"corpus_count"`
+	OKRuns            int       `json:"ok_runs"`
+	CrashRuns         int       `json:"crash_runs"`
+	ErrorRuns         int       `json:"error_runs"`
+	IncompleteRuns    int       `json:"incomplete_runs"`
+	CanceledRuns      int       `json:"canceled_runs"`
 }
 
 // StatsBucketFromStore converts a store.StatsBucket into an API StatsBucket DTO.
 func StatsBucketFromStore(b store.StatsBucket) StatsBucket {
-	return StatsBucket{
+	return StatsBucket{DetectedRevisions: b.DetectedRevisions, TestedRevisions: b.TestedRevisions,
 		BucketStart:    b.BucketStart,
 		Runs:           b.Runs,
 		Execs:          b.Execs,
@@ -326,6 +329,7 @@ func StatsBucketFromStore(b store.StatsBucket) StatsBucket {
 
 // StatsResponse is returned by GET /api/stats and GET /api/stats/{query}.
 type StatsResponse struct {
+	Revisions      []Revision    `json:"revisions,omitempty"`
 	Query          string        `json:"query"`
 	Window         string        `json:"window"`
 	BucketSeconds  int           `json:"bucket_seconds"`
@@ -353,7 +357,7 @@ func StatsResponseFromStore(s store.StatsSeries) StatsResponse {
 	for _, b := range s.Buckets {
 		buckets = append(buckets, StatsBucketFromStore(b))
 	}
-	return StatsResponse{
+	return StatsResponse{Revisions: s.Revisions,
 		Query:          s.Query,
 		Window:         s.Window,
 		BucketSeconds:  s.BucketSeconds,
@@ -375,3 +379,6 @@ func StatsResponseFromStore(s store.StatsSeries) StatsResponse {
 		Buckets:        buckets,
 	}
 }
+
+// Revision describes an observed repository revision and its verification progress.
+type Revision = store.Revision

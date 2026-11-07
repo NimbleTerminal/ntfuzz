@@ -101,6 +101,12 @@ func (v *Viewer) Refresh() (err error) {
 	if _, e := db.GetStats(ctx, store.StatsQueryThroughput, store.StatsWindow24h, "", ""); err == nil {
 		err = e
 	}
+	if err == nil {
+		_, err = db.GetRevisionStats(ctx, store.StatsWindow24h, "")
+	}
+	if err == nil {
+		_, err = db.ListCrashReplays(ctx)
+	}
 	if err != nil {
 		_ = db.Close()
 		return err

@@ -262,20 +262,21 @@
     },
     "/api/stats/{query}": {
       "get": {
-        "summary": "Time-bucketed canned statistics (throughput, coverage, outcomes)",
+        "summary": "Time-bucketed statistics and revision/recovery progress",
         "operationId": "getStatsResponse",
         "parameters": [
           {
             "name": "query",
             "in": "path",
-            "description": "Canned query name: throughput, coverage, or outcomes.",
+            "description": "Canned query: throughput, coverage, outcomes, or revisions.",
             "required": true,
             "schema": {
               "type": "string",
               "enum": [
                 "throughput",
                 "coverage",
-                "outcomes"
+                "outcomes",
+                "revisions"
               ],
               "default": "throughput"
             }
@@ -309,7 +310,7 @@
           {
             "name": "target",
             "in": "query",
-            "description": "Optional target ID, name, or project/name filter.",
+            "description": "Optional target filter; unsupported for the project-level revisions query.",
             "required": false,
             "schema": {
               "type": "string"
@@ -372,6 +373,27 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/crash-replays": {
+      "get": {
+        "summary": "Latest saved-input verification per crash, revision, and input (up to 1000 records)",
+        "operationId": "listCrashReplays",
+        "responses": {
+          "200": {
+            "description": "Replay history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CrashReplay"
+                  }
                 }
               }
             }
@@ -944,6 +966,12 @@
           "canceled_runs": {
             "type": "integer",
             "format": "int64"
+          },
+          "detected_revisions": {
+            "type": "integer"
+          },
+          "tested_revisions": {
+            "type": "integer"
           }
         },
         "required": [
@@ -961,7 +989,9 @@
           "crash_runs",
           "error_runs",
           "incomplete_runs",
-          "canceled_runs"
+          "canceled_runs",
+          "detected_revisions",
+          "tested_revisions"
         ]
       },
       "StatsResponse": {
@@ -1040,6 +1070,12 @@
             "items": {
               "$ref": "#/components/schemas/StatsBucket"
             }
+          },
+          "revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Revision"
+            }
           }
         },
         "required": [
@@ -1072,6 +1108,119 @@
         "required": [
           "error"
         ]
+      },
+      "Revision": {
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string"
+          },
+          "git_sha": {
+            "type": "string"
+          },
+          "previous_sha": {
+            "type": "string"
+          },
+          "sync_error": {
+            "type": "string"
+          },
+          "detected_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_synced": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "first_run": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "baseline": {
+            "type": "boolean"
+          },
+          "current": {
+            "type": "boolean"
+          },
+          "runs": {
+            "type": "integer"
+          },
+          "ok_runs": {
+            "type": "integer"
+          },
+          "crash_runs": {
+            "type": "integer"
+          },
+          "error_runs": {
+            "type": "integer"
+          },
+          "tested_targets": {
+            "type": "integer"
+          },
+          "active_targets": {
+            "type": "integer"
+          },
+          "replay_passed": {
+            "type": "integer"
+          },
+          "replay_failed": {
+            "type": "integer"
+          },
+          "replay_blocked": {
+            "type": "integer"
+          },
+          "replay_pending": {
+            "type": "integer"
+          }
+        },
+        "description": "A unique observed project SHA. First observations are baselines, not historical detection dates. Run totals exclude dirty runs and survive pruning. Replay passed means the saved input no longer reproduces.",
+        "required": [
+          "project",
+          "git_sha",
+          "previous_sha",
+          "detected_at",
+          "baseline",
+          "current",
+          "runs",
+          "ok_runs",
+          "crash_runs",
+          "error_runs",
+          "tested_targets",
+          "active_targets",
+          "replay_passed",
+          "replay_failed",
+          "replay_blocked",
+          "replay_pending"
+        ]
+      },
+      "CrashReplay": {
+        "type": "object",
+        "properties": {
+          "crash_id": {
+            "type": "integer"
+          },
+          "git_sha": {
+            "type": "string"
+          },
+          "input_hash": {
+            "type": "string"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed",
+              "blocked"
+            ]
+          },
+          "diagnostic": {
+            "type": "string"
+          }
+        }
       }
     }
   }
