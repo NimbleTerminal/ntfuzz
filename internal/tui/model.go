@@ -245,13 +245,7 @@ func NewActionModelOptions(client *api.Client, refreshInterval time.Duration, re
 	base := NewModelOptions(client, refreshInterval, readOnly)
 	return bubblehelp.NewModelWithFallback(base, DescribeActions, bubblehelp.ModelOptions{
 		Adapter: bubblehelp.Options{
-			Customize: func(b key.Binding, a *actions.Action) error {
-				if len(a.Keys) > 1 {
-					pref := 0
-					a.Preferred = &pref
-				}
-				return nil
-			},
+			Customize: compactActionMetadata,
 		},
 	})
 }
@@ -1474,4 +1468,15 @@ func (m Model) keyMap() KeyMap {
 		km.FixCrash.SetEnabled(false)
 	}
 	return km
+}
+
+// The OSC status message has a 2 KiB budget. Buttons need one preferred
+// gesture; aliases and keyboard hints remain available in the terminal help.
+func compactActionMetadata(_ key.Binding, a *actions.Action) error {
+	if len(a.Keys) > 1 {
+		a.Keys = a.Keys[:1]
+	}
+	a.Preferred = nil
+	a.Hint = ""
+	return nil
 }

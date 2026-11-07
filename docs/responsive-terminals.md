@@ -17,7 +17,10 @@ session. ntfuzz consumes terminal resize messages. No new wire protocol, user-ag
 sniffing, reconnect-on-rotation, or browser-specific application mode is needed.
 
 Terminal Actions already expose the TUI key map as buttons. This change adds the
-revision paging bindings to that map. The narrow host presents a horizontally
+revision paging bindings to that map. The OSC status envelope has a 2 KiB decoded-message budget. Adding paging
+exceeded it when all key aliases and hints were included; ntfuzz now publishes
+one preferred gesture per button, leaving aliases in terminal help. Tests use
+the complete status summary and a realistic session identifier. The narrow host presents a horizontally
 scrollable action rail with 44px minimum targets; tapping an action does not ask
 for the keyboard. The existing Keyboard action remains explicit.
 

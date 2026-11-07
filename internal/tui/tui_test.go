@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"nimbleterminal.dev/booba/actions"
 	"nimbleterminal.dev/booba/actions/bubblehelp"
 
 	"nimbleterminal.dev/ntfuzz/internal/api"
@@ -663,5 +664,34 @@ func TestRevisionTableAndPagination(t *testing.T) {
 	m = next.(Model)
 	if m.revisionPage != 1 {
 		t.Fatal("page did not advance")
+	}
+}
+
+func TestAllLiveActionDescriptionsFitStatusBudget(t *testing.T) {
+	for _, mode := range []ViewMode{ViewFleet, ViewDetail, ViewCrashes, ViewStats} {
+		for query := range CannedQueries {
+			m := NewModelOptions(nil, time.Second, true)
+			m.mode = mode
+			m.statsQueryIdx = query
+			d := DescribeActions(m)
+			snap, diags, err := bubblehelp.Snapshot(d.Keys, "1234567890abcdef1234567890abcdef", d.Context, 999999, bubblehelp.Options{Summary: d.Status.Summary, Customize: compactActionMetadata})
+			if err != nil || len(diags) > 0 {
+				t.Fatalf("%v/%d: %v %+v", mode, query, err, diags)
+			}
+			if _, err = actions.EncodeProgramStatus(snap, d.Status); err != nil {
+				t.Fatal(err)
+			}
+			if mode == ViewStats && query == 3 {
+				found := 0
+				for _, a := range snap.Actions {
+					if a.Label == "Prev page" || a.Label == "Next page" {
+						found++
+					}
+				}
+				if found != 2 {
+					t.Fatal("paging controls missing")
+				}
+			}
+		}
 	}
 }
