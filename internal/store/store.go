@@ -159,6 +159,67 @@ type FleetStats struct {
 	SchemaVersion int     `json:"schema_version"`
 }
 
+// Canned stats query identifiers supported by GetStats and GET /api/stats/{query}.
+const (
+	StatsQueryThroughput = "throughput"
+	StatsQueryCoverage   = "coverage"
+	StatsQueryOutcomes   = "outcomes"
+)
+
+// Supported time window identifiers for canned stats queries.
+const (
+	StatsWindow1h  = "1h"
+	StatsWindow6h  = "6h"
+	StatsWindow24h = "24h"
+	StatsWindow7d  = "7d"
+	StatsWindow14d = "14d"
+)
+
+// ErrInvalidStatsParam is returned when an unknown stats query or time window is requested.
+var ErrInvalidStatsParam = errors.New("invalid stats parameter")
+
+// StatsBucket represents a single time-bucketed aggregation over fuzz runs.
+type StatsBucket struct {
+	BucketStart    time.Time `json:"bucket_start"`
+	Runs           int       `json:"runs"`
+	Execs          int64     `json:"execs"`
+	DurationSec    float64   `json:"duration_sec"`
+	AvgExecsPerSec float64   `json:"avg_execs_per_sec"`
+	PeakExecsSec   float64   `json:"peak_execs_per_sec"`
+	AvgCoveragePct float64   `json:"avg_coverage_pct"`
+	MaxCoveragePct float64   `json:"max_coverage_pct"`
+	NewInteresting int       `json:"new_interesting"`
+	CorpusCount    int       `json:"corpus_count"`
+	OKRuns         int       `json:"ok_runs"`
+	CrashRuns      int       `json:"crash_runs"`
+	ErrorRuns      int       `json:"error_runs"`
+	IncompleteRuns int       `json:"incomplete_runs"`
+	CanceledRuns   int       `json:"canceled_runs"`
+}
+
+// StatsSeries holds time-bucketed metrics and window summary totals for a canned stats query.
+type StatsSeries struct {
+	Query          string        `json:"query"`
+	Window         string        `json:"window"`
+	BucketSeconds  int           `json:"bucket_seconds"`
+	Project        string        `json:"project,omitempty"`
+	Target         string        `json:"target,omitempty"`
+	TotalRuns      int           `json:"total_runs"`
+	TotalExecs     int64         `json:"total_execs"`
+	AvgExecsPerSec float64       `json:"avg_execs_per_sec"`
+	PeakExecsSec   float64       `json:"peak_execs_per_sec"`
+	AvgCoveragePct float64       `json:"avg_coverage_pct"`
+	MaxCoveragePct float64       `json:"max_coverage_pct"`
+	NewInteresting int           `json:"new_interesting"`
+	CorpusCount    int           `json:"corpus_count"`
+	OKRuns         int           `json:"ok_runs"`
+	CrashRuns      int           `json:"crash_runs"`
+	ErrorRuns      int           `json:"error_runs"`
+	IncompleteRuns int           `json:"incomplete_runs"`
+	CanceledRuns   int           `json:"canceled_runs"`
+	Buckets        []StatsBucket `json:"buckets"`
+}
+
 // Open opens or creates a DuckDB database at path (use "" or ":memory:" for in-memory)
 // and runs versioned schema migrations.
 func Open(path string) (*Store, error) {
@@ -1080,4 +1141,174 @@ func (s *Store) GetFleetStats(ctx context.Context) (FleetStats, error) {
 	}
 	stats.SchemaVersion, _ = s.schemaVersionLocked(ctx)
 	return stats, nil
+}
+
+// ParseStatsQuery validates and normalizes a canned stats query identifier.
+func ParseStatsQuery(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", StatsQueryThroughput:
+		return StatsQueryThroughput, nil
+	case StatsQueryCoverage:
+		return StatsQueryCoverage, nil
+	case StatsQueryOutcomes:
+		return StatsQueryOutcomes, nil
+	default:
+		return "", fmt.Errorf("%w: unknown query %q (expected throughput, coverage, or outcomes)", ErrInvalidStatsParam, raw)
+	}
+}
+
+// ParseStatsWindow validates and normalizes a time window identifier, returning the canonical
+// window string, bucket size in seconds, lookback SQL interval literal, and bucket SQL interval literal.
+func ParseStatsWindow(raw string) (window string, bucketSeconds int, lookbackSQL, bucketSQL string, err error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case StatsWindow1h:
+		return StatsWindow1h, 300, "INTERVAL '1 hour'", "INTERVAL '5 minutes'", nil
+	case StatsWindow6h:
+		return StatsWindow6h, 900, "INTERVAL '6 hours'", "INTERVAL '15 minutes'", nil
+	case "", StatsWindow24h:
+		return StatsWindow24h, 3600, "INTERVAL '24 hours'", "INTERVAL '1 hour'", nil
+	case StatsWindow7d:
+		return StatsWindow7d, 21600, "INTERVAL '7 days'", "INTERVAL '6 hours'", nil
+	case StatsWindow14d:
+		return StatsWindow14d, 43200, "INTERVAL '14 days'", "INTERVAL '12 hours'", nil
+	default:
+		return "", 0, "", "", fmt.Errorf("%w: unknown window %q (expected 1h, 6h, 24h, 7d, or 14d)", ErrInvalidStatsParam, raw)
+	}
+}
+
+// GetStats executes a canned time-series aggregation query ("throughput", "coverage", or "outcomes")
+// over fuzz runs within the requested window ("1h", "6h", "24h", "7d", "14d"), optionally filtered by
+// project (name or ID) and/or target (ID, name, or project/name).
+func (s *Store) GetStats(ctx context.Context, queryName, windowName, projectFilter, targetFilter string) (StatsSeries, error) {
+	qName, err := ParseStatsQuery(queryName)
+	if err != nil {
+		return StatsSeries{}, err
+	}
+	win, bucketSec, lookbackSQL, bucketSQL, err := ParseStatsWindow(windowName)
+	if err != nil {
+		return StatsSeries{}, err
+	}
+
+	proj := strings.TrimSpace(projectFilter)
+	tgt := strings.TrimSpace(targetFilter)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sqlQuery := fmt.Sprintf(`
+		SELECT
+			time_bucket(%s, r.started) AS bucket_start,
+			CAST(COUNT(*) AS BIGINT) AS runs,
+			CAST(COALESCE(SUM(r.execs), 0) AS BIGINT) AS execs,
+			COALESCE(SUM(r.duration_sec), 0.0) AS duration_sec,
+			COALESCE(AVG(CASE WHEN r.execs_per_sec > 0 THEN r.execs_per_sec END), 0.0) AS avg_execs_per_sec,
+			COALESCE(MAX(r.execs_per_sec), 0.0) AS peak_execs_per_sec,
+			COALESCE(AVG(CASE WHEN r.coverage_pct > 0 THEN r.coverage_pct END), 0.0) AS avg_coverage_pct,
+			COALESCE(MAX(r.coverage_pct), 0.0) AS max_coverage_pct,
+			CAST(COALESCE(SUM(r.new_interesting), 0) AS BIGINT) AS new_interesting,
+			CAST(COALESCE(MAX(COALESCE(r.corpus_count, 0)), 0) AS BIGINT) AS corpus_count,
+			CAST(COALESCE(SUM(CASE WHEN r.status = 'ok' THEN 1 ELSE 0 END), 0) AS BIGINT) AS ok_runs,
+			CAST(COALESCE(SUM(CASE WHEN r.status = 'crash' THEN 1 ELSE 0 END), 0) AS BIGINT) AS crash_runs,
+			CAST(COALESCE(SUM(CASE WHEN r.status IN ('error', 'missing_target') THEN 1 ELSE 0 END), 0) AS BIGINT) AS error_runs,
+			CAST(COALESCE(SUM(CASE WHEN r.status = 'incomplete' THEN 1 ELSE 0 END), 0) AS BIGINT) AS incomplete_runs,
+			CAST(COALESCE(SUM(CASE WHEN r.status = 'canceled' THEN 1 ELSE 0 END), 0) AS BIGINT) AS canceled_runs
+		FROM runs r
+		JOIN targets t ON t.id = r.target_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE r.started >= (SELECT COALESCE(MAX(started), CURRENT_TIMESTAMP) FROM runs) - %s
+	`, bucketSQL, lookbackSQL)
+
+	var args []any
+	if proj != "" {
+		sqlQuery += ` AND (p.name = ? OR CAST(p.id AS VARCHAR) = ?)`
+		args = append(args, proj, proj)
+	}
+	if tgt != "" {
+		sqlQuery += ` AND (CAST(r.target_id AS VARCHAR) = ? OR t.name = ? OR (p.name || '/' || t.name) = ?)`
+		args = append(args, tgt, tgt, tgt)
+	}
+	sqlQuery += ` GROUP BY bucket_start ORDER BY bucket_start ASC`
+
+	rows, err := s.query(ctx, sqlQuery, args...)
+	if err != nil {
+		return StatsSeries{}, fmt.Errorf("get stats (%s/%s): %w", qName, win, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := StatsSeries{
+		Query:         qName,
+		Window:        win,
+		BucketSeconds: bucketSec,
+		Project:       proj,
+		Target:        tgt,
+		Buckets:       []StatsBucket{},
+	}
+
+	var (
+		execRateWeightedSum float64
+		execRateWeight      int
+		covWeightedSum      float64
+		covWeight           int
+	)
+
+	for rows.Next() {
+		var b StatsBucket
+		if err := rows.Scan(
+			&b.BucketStart,
+			&b.Runs,
+			&b.Execs,
+			&b.DurationSec,
+			&b.AvgExecsPerSec,
+			&b.PeakExecsSec,
+			&b.AvgCoveragePct,
+			&b.MaxCoveragePct,
+			&b.NewInteresting,
+			&b.CorpusCount,
+			&b.OKRuns,
+			&b.CrashRuns,
+			&b.ErrorRuns,
+			&b.IncompleteRuns,
+			&b.CanceledRuns,
+		); err != nil {
+			return StatsSeries{}, fmt.Errorf("scan stats bucket: %w", err)
+		}
+		out.Buckets = append(out.Buckets, b)
+		out.TotalRuns += b.Runs
+		out.TotalExecs += b.Execs
+		if b.PeakExecsSec > out.PeakExecsSec {
+			out.PeakExecsSec = b.PeakExecsSec
+		}
+		if b.MaxCoveragePct > out.MaxCoveragePct {
+			out.MaxCoveragePct = b.MaxCoveragePct
+		}
+		out.NewInteresting += b.NewInteresting
+		if b.CorpusCount > out.CorpusCount {
+			out.CorpusCount = b.CorpusCount
+		}
+		out.OKRuns += b.OKRuns
+		out.CrashRuns += b.CrashRuns
+		out.ErrorRuns += b.ErrorRuns
+		out.IncompleteRuns += b.IncompleteRuns
+		out.CanceledRuns += b.CanceledRuns
+
+		if b.AvgExecsPerSec > 0 && b.Runs > 0 {
+			execRateWeightedSum += b.AvgExecsPerSec * float64(b.Runs)
+			execRateWeight += b.Runs
+		}
+		if b.AvgCoveragePct > 0 && b.Runs > 0 {
+			covWeightedSum += b.AvgCoveragePct * float64(b.Runs)
+			covWeight += b.Runs
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return StatsSeries{}, err
+	}
+
+	if execRateWeight > 0 {
+		out.AvgExecsPerSec = execRateWeightedSum / float64(execRateWeight)
+	}
+	if covWeight > 0 {
+		out.AvgCoveragePct = covWeightedSum / float64(covWeight)
+	}
+	return out, nil
 }

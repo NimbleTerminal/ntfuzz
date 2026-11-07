@@ -53,7 +53,7 @@ func TestSnapshotIsolationAndRefresh(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 	live := api.NewServer(writer, nil)
-	for _, path := range []string{"/api/projects", "/api/targets", "/api/runs", "/api/crashes", "/api/coverage/history?target=FuzzParse", "/api/targets?project=demo%27%20OR%201%3D1%20--", "/api/targets?project=%27%20OR%201%3D1%20--", "/api/runs?target=%27%20OR%201%3D1%20--"} {
+	for _, path := range []string{"/api/projects", "/api/targets", "/api/runs", "/api/crashes", "/api/coverage/history?target=FuzzParse", "/api/stats/throughput?window=24h", "/api/stats/coverage?window=7d", "/api/stats/outcomes?window=1h", "/api/targets?project=demo%27%20OR%201%3D1%20--", "/api/targets?project=%27%20OR%201%3D1%20--", "/api/runs?target=%27%20OR%201%3D1%20--"} {
 		want := httptest.NewRecorder()
 		live.ServeHTTP(want, httptest.NewRequest("GET", path, nil))
 		got := httptest.NewRecorder()

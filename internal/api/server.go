@@ -72,6 +72,8 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("POST /api/crashes/{id}/fix", s.handleFixCrash)
 	}
 	s.mux.HandleFunc("GET /api/coverage/history", s.handleCoverageHistory)
+	s.mux.HandleFunc("GET /api/stats", s.handleStats)
+	s.mux.HandleFunc("GET /api/stats/{query}", s.handleStats)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
 }
 
@@ -208,6 +210,27 @@ func (s *Server) handleCoverageHistory(w http.ResponseWriter, r *http.Request) {
 		out = append(out, CoveragePointFromStore(pt))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.PathValue("query"))
+	if query == "" {
+		query = strings.TrimSpace(r.URL.Query().Get("query"))
+	}
+	window := strings.TrimSpace(r.URL.Query().Get("window"))
+	project := strings.TrimSpace(r.URL.Query().Get("project"))
+	target := strings.TrimSpace(r.URL.Query().Get("target"))
+
+	series, err := s.store.GetStats(r.Context(), query, window, project, target)
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidStatsParam) {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, StatsResponseFromStore(series))
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

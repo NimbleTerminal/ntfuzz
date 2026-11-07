@@ -260,6 +260,96 @@
         }
       }
     },
+    "/api/stats/{query}": {
+      "get": {
+        "summary": "Time-bucketed canned statistics (throughput, coverage, outcomes)",
+        "operationId": "getStatsResponse",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "path",
+            "description": "Canned query name: throughput, coverage, or outcomes.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "throughput",
+                "coverage",
+                "outcomes"
+              ],
+              "default": "throughput"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "description": "Lookback time window (1h, 6h, 24h, 7d, 14d).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1h",
+                "6h",
+                "24h",
+                "7d",
+                "14d"
+              ],
+              "default": "24h"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Optional project ID or name filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Optional target ID, name, or project/name filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or window parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/status": {
       "get": {
         "summary": "Fleet status and snapshot freshness",
@@ -790,6 +880,186 @@
           "schema_version",
           "active_jobs",
           "updated_at"
+        ]
+      },
+      "StatsBucket": {
+        "type": "object",
+        "properties": {
+          "bucket_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "execs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "duration_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "avg_execs_per_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "peak_execs_per_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "avg_coverage_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "max_coverage_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "new_interesting": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "corpus_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ok_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "crash_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "error_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "incomplete_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "canceled_runs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "bucket_start",
+          "runs",
+          "execs",
+          "duration_sec",
+          "avg_execs_per_sec",
+          "peak_execs_per_sec",
+          "avg_coverage_pct",
+          "max_coverage_pct",
+          "new_interesting",
+          "corpus_count",
+          "ok_runs",
+          "crash_runs",
+          "error_runs",
+          "incomplete_runs",
+          "canceled_runs"
+        ]
+      },
+      "StatsResponse": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "window": {
+            "type": "string"
+          },
+          "bucket_seconds": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "total_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_execs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "avg_execs_per_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "peak_execs_per_sec": {
+            "type": "number",
+            "format": "double"
+          },
+          "avg_coverage_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "max_coverage_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "new_interesting": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "corpus_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ok_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "crash_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "error_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "incomplete_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "canceled_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatsBucket"
+            }
+          }
+        },
+        "required": [
+          "query",
+          "window",
+          "bucket_seconds",
+          "total_runs",
+          "total_execs",
+          "avg_execs_per_sec",
+          "peak_execs_per_sec",
+          "avg_coverage_pct",
+          "max_coverage_pct",
+          "new_interesting",
+          "corpus_count",
+          "ok_runs",
+          "crash_runs",
+          "error_runs",
+          "incomplete_runs",
+          "canceled_runs",
+          "buckets"
         ]
       },
       "Error": {

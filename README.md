@@ -31,6 +31,7 @@
   - `GET /api/crashes?open=true` — open (or all) crashes with stack traces, stack fingerprints, and durable corpus paths
   - `POST /api/crashes/{id}/fix` — mark a crash fixed (and optionally attach `issue_url`)
   - `GET /api/coverage/history?target=...` — chronological coverage & corpus growth series
+  - `GET /api/stats/{query}?window=24h&project=...` — canned time-bucketed analytical queries (`throughput`, `coverage`, `outcomes`) over `1h`, `6h`, `24h`, `7d`, or `14d`
   - `GET /api/status` — fleet health, 24h run counts, schema version, and active worker jobs
 - **Shared Bubble Tea TUI + Booba Browser Bridge**:
   - The TUI talks strictly to the HTTP API DTOs in `internal/api` (never imports `internal/store` or opens DuckDB directly).
@@ -125,6 +126,8 @@ projects:
 | `enter` | Target detail | Open selected target's run history, `ntcharts` coverage sparkline, and crashes |
 | `esc` / `backspace` | Back to fleet | Return to the main fleet overview |
 | `p` / `tab` | Filter project | Cycle through projects (`All Projects` → project 1 → ...) |
+| `g` | Stats graphs | Toggle the canned time-series `ntcharts` view (`throughput`, `coverage`, `outcomes`) |
+| `w` | Time window | Cycle time window (`1h` → `6h` → `24h` → `7d` → `14d`) in Stats view |
 | `c` | Open crashes | Toggle the fleet-wide open crashes view |
 | `x` | Mark crash fixed | Mark the selected open crash as fixed (in Crashes view) |
 | `r` | Refresh now | Poll the HTTP API immediately |
@@ -242,7 +245,7 @@ All metrics use bounded labels (`mode`, `route`, `method`, `status_class`, `reas
 
 | Metric Name | Type | Unit | Labels | Modes | Description |
 | --- | --- | --- | --- | --- | --- |
-| `ntfuzz_http_requests_total` | Counter | requests | `mode`, `route`, `method`, `status_class` | `serve`, `view` | External HTTP requests handled (`route` templates: `/`, `/ws`, `/wt`, `/cert-hash`, `/static/*`, `/api/projects`, `/api/targets`, `/api/runs`, `/api/crashes`, `/api/crashes/{id}/fix`, `/api/coverage/history`, `/api/status`, `other`) |
+| `ntfuzz_http_requests_total` | Counter | requests | `mode`, `route`, `method`, `status_class` | `serve`, `view` | External HTTP requests handled (`route` templates: `/`, `/ws`, `/wt`, `/cert-hash`, `/static/*`, `/api/projects`, `/api/targets`, `/api/runs`, `/api/crashes`, `/api/crashes/{id}/fix`, `/api/coverage/history`, `/api/stats`, `/api/stats/{query}`, `/api/status`, `other`) |
 | `ntfuzz_http_request_duration_seconds` | Histogram | seconds | `mode`, `route`, `method`, `status_class` | `serve`, `view` | External HTTP request latency in seconds (for `/ws`, measures HTTP upgrade handshake latency) |
 | `ntfuzz_terminal_sessions_active` | Gauge | sessions | `mode` | `serve`, `view` | Currently active browser-terminal sessions |
 | `ntfuzz_terminal_sessions_opened_total` | Counter | sessions | `mode` | `serve`, `view` | Total browser-terminal sessions opened |

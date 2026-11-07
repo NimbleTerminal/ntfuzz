@@ -152,7 +152,7 @@ func TestModelPureTransitionsAndViews(t *testing.T) {
 }
 
 func TestBoobaTerminalActionsSnapshot(t *testing.T) {
-	for _, mode := range []ViewMode{ViewFleet, ViewDetail, ViewCrashes} {
+	for _, mode := range []ViewMode{ViewFleet, ViewDetail, ViewCrashes, ViewStats} {
 		km := NewKeyMap(mode, false)
 		snap, diags, err := bubblehelp.Snapshot(km, "ntfuzz", mode.ContextName(), 1, bubblehelp.Options{})
 		if err != nil {
@@ -204,6 +204,7 @@ func TestLayoutTracksWindowWidth(t *testing.T) {
 			"cards":   m.renderOverviewCards(),
 			"fleet":   m.renderFleetView(),
 			"crashes": m.renderCrashesView(),
+			"stats":   m.renderStatsView(),
 		} {
 			if got := lipgloss.Width(view); got > width {
 				t.Errorf("%s width = %d after resize to %d", name, got, width)
@@ -534,5 +535,107 @@ func TestCoverageTrendConsistencyAndVisibilityAtStandardWidth(t *testing.T) {
 	fleet := m.renderFleetView()
 	if !strings.Contains(fleet, "COV TREND") || !strings.Contains(fleet, "↑") {
 		t.Fatalf("expected COV TREND column and rising indicator at default width 116, got:\n%s", fleet)
+	}
+}
+
+func TestStatsCannedQueriesViewAndNavigation(t *testing.T) {
+	m := NewModel(nil, time.Second)
+	m.width = 130
+	m.height = 40
+
+	// Press 'g' to enter ViewStats
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
+	m = next.(Model)
+	if m.mode != ViewStats {
+		t.Fatalf("expected ViewStats after pressing 'g', got %v", m.mode)
+	}
+
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	next, _ = m.Update(statsDataMsg{
+		stats: api.StatsResponse{
+			Query:          api.StatsQueryThroughput,
+			Window:         api.StatsWindow24h,
+			BucketSeconds:  3600,
+			TotalRuns:      5,
+			TotalExecs:     250000,
+			AvgExecsPerSec: 18500,
+			PeakExecsSec:   24000,
+			AvgCoveragePct: 72.5,
+			MaxCoveragePct: 81.0,
+			NewInteresting: 9,
+			CorpusCount:    42,
+			OKRuns:         4,
+			CrashRuns:      1,
+			Buckets: []api.StatsBucket{
+				{
+					BucketStart:    now.Add(-time.Hour),
+					Runs:           2,
+					Execs:          90000,
+					AvgExecsPerSec: 15000,
+					PeakExecsSec:   16000,
+					AvgCoveragePct: 68.0,
+					MaxCoveragePct: 70.0,
+					NewInteresting: 3,
+					CorpusCount:    36,
+					OKRuns:         2,
+				},
+				{
+					BucketStart:    now,
+					Runs:           3,
+					Execs:          160000,
+					AvgExecsPerSec: 20833,
+					PeakExecsSec:   24000,
+					AvgCoveragePct: 75.5,
+					MaxCoveragePct: 81.0,
+					NewInteresting: 6,
+					CorpusCount:    42,
+					OKRuns:         2,
+					CrashRuns:      1,
+				},
+			},
+		},
+	})
+	m = next.(Model)
+
+	// 1. Default query is Throughput Over Time
+	view := m.View().Content
+	if !strings.Contains(view, "Throughput Over Time") || !strings.Contains(view, "250.0k") || !strings.Contains(view, "Avg Execs/sec") {
+		t.Fatalf("expected throughput stats view, got:\n%s", view)
+	}
+
+	// 2. Press 'down' ('j') to cycle to Coverage & Corpus Growth
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m = next.(Model)
+	if m.currentStatsQuery().ID != api.StatsQueryCoverage {
+		t.Fatalf("expected coverage query after 'j', got %s", m.currentStatsQuery().ID)
+	}
+	covView := m.View().Content
+	if !strings.Contains(covView, "Coverage & Corpus Growth") || !strings.Contains(covView, "Avg Coverage: 72.5%") || !strings.Contains(covView, "Max Corpus: 42") {
+		t.Fatalf("expected coverage stats view, got:\n%s", covView)
+	}
+
+	// 3. Press 'down' ('j') to cycle to Run Outcomes Over Time
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m = next.(Model)
+	if m.currentStatsQuery().ID != api.StatsQueryOutcomes {
+		t.Fatalf("expected outcomes query after second 'j', got %s", m.currentStatsQuery().ID)
+	}
+	outView := m.View().Content
+	if !strings.Contains(outView, "Run Outcomes Over Time") || !strings.Contains(outView, "OK: 4") || !strings.Contains(outView, "Crash: 1") {
+		t.Fatalf("expected outcomes stats view, got:\n%s", outView)
+	}
+
+	// 4. Press 'w' to cycle time window ("24h" -> "7d")
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'w', Text: "w"})
+	m = next.(Model)
+	if m.currentStatsWindow() != api.StatsWindow7d {
+		t.Fatalf("expected 7d window after 'w', got %s", m.currentStatsWindow())
+	}
+
+	// 5. Press 'g' again to toggle back to ViewFleet
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
+	m = next.(Model)
+	if m.mode != ViewFleet {
+		t.Fatalf("expected ViewFleet after pressing 'g' in ViewStats, got %v", m.mode)
 	}
 }

@@ -22,6 +22,7 @@ minimized_input is a server-local corpus file path, not a download URL or input 
 - [Open crashes](/api/crashes?open=true): defaults to open only; open=false or open=all includes fixed crashes. Optional target filter.
 - [Runs](/api/runs?limit=2): most recent first; optional target filter; limit defaults to 100.
 - [Coverage history](/api/coverage/history?target=8&limit=50): replace example target ID; chronological series of the most recent points, default limit 50. Missing target returns an empty array.
+- [Time-series stats](/api/stats/throughput?window=24h): canned time-bucketed queries (`throughput`, `coverage`, `outcomes`) over windows (`1h`, `6h`, `24h`, `7d`, `14d`) with optional `project` and `target` filters.
 
 Target filters accept numeric ID, target name, or project-qualified target name (project/name). Prefer IDs. Positive integer limits are supported; missing or invalid limits use the default. List responses are JSON arrays; failures return an error string in a JSON object. open accepts true/1, false/0/all; invalid values return HTTP 400.
 

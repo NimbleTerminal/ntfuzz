@@ -104,6 +104,28 @@ func (c *Client) GetCoverageHistory(ctx context.Context, target string) ([]Cover
 	return out, err
 }
 
+// GetStats fetches time-bucketed statistics for a canned query ("throughput", "coverage", "outcomes")
+// from GET /api/stats/{query}.
+func (c *Client) GetStats(ctx context.Context, query, window, project, target string) (StatsResponse, error) {
+	qName := strings.TrimSpace(query)
+	if qName == "" {
+		qName = StatsQueryThroughput
+	}
+	q := url.Values{}
+	if window != "" {
+		q.Set("window", window)
+	}
+	if project != "" {
+		q.Set("project", project)
+	}
+	if target != "" {
+		q.Set("target", target)
+	}
+	var out StatsResponse
+	err := c.doJSON(ctx, http.MethodGet, "/api/stats/"+url.PathEscape(qName), q, nil, &out)
+	return out, err
+}
+
 func (c *Client) doJSON(ctx context.Context, method, path string, query url.Values, reqBody, dst any) error {
 	u := c.baseURL + path
 	if len(query) > 0 {

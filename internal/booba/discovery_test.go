@@ -76,15 +76,15 @@ func TestOpenAPIWireSchemas(t *testing.T) {
 	if err := json.Unmarshal(raw, &spec); err != nil {
 		t.Fatal(err)
 	}
-	if spec.OpenAPI != "3.0.3" || len(spec.Paths) != 6 {
+	if spec.OpenAPI != "3.0.3" || len(spec.Paths) != 7 {
 		t.Fatal("unexpected API document")
 	}
-	for _, path := range []string{"/api/projects", "/api/targets", "/api/runs", "/api/crashes", "/api/coverage/history", "/api/status"} {
+	for _, path := range []string{"/api/projects", "/api/targets", "/api/runs", "/api/crashes", "/api/coverage/history", "/api/stats/{query}", "/api/status"} {
 		if _, ok := spec.Paths[path]["get"]; !ok {
 			t.Errorf("missing GET %s", path)
 		}
 	}
-	for _, dto := range []any{api.Project{}, api.Target{}, api.Run{}, api.Crash{}, api.CoveragePoint{}, api.ActiveJob{}, api.StatusResponse{}} {
+	for _, dto := range []any{api.Project{}, api.Target{}, api.Run{}, api.Crash{}, api.CoveragePoint{}, api.StatsBucket{}, api.StatsResponse{}, api.ActiveJob{}, api.StatusResponse{}} {
 		typ := reflect.TypeOf(dto)
 		schema := spec.Components.Schemas[typ.Name()]
 		if len(schema.Properties) != typ.NumField() {

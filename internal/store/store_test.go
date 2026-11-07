@@ -310,3 +310,93 @@ func TestCanceledRunIsNotFailure(t *testing.T) {
 		t.Fatalf("projects=%+v err=%v", projects, err)
 	}
 }
+
+func TestStoreCannedStatsQueries(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	base := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	pID, err := st.UpsertProject(ctx, "stats-proj", "./repo", "main", &base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tID, err := st.UpsertTarget(ctx, pID, "example.com/stats", "FuzzStats")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert two runs in distinct 1-hour buckets within 24h, plus one run 3 days earlier.
+	for _, r := range []Run{
+		{
+			TargetID:       tID,
+			Started:        base.Add(-72 * time.Hour),
+			DurationSec:    2.0,
+			Execs:          10000,
+			ExecsPerSec:    5000,
+			NewInteresting: 1,
+			CorpusCount:    5,
+			CoveragePct:    40.0,
+			Status:         "ok",
+		},
+		{
+			TargetID:       tID,
+			Started:        base.Add(-2 * time.Hour),
+			DurationSec:    4.0,
+			Execs:          40000,
+			ExecsPerSec:    10000,
+			NewInteresting: 2,
+			CorpusCount:    10,
+			CoveragePct:    60.0,
+			Status:         "ok",
+		},
+		{
+			TargetID:       tID,
+			Started:        base,
+			DurationSec:    5.0,
+			Execs:          100000,
+			ExecsPerSec:    20000,
+			NewInteresting: 4,
+			CorpusCount:    14,
+			Crashes:        1,
+			CoveragePct:    80.0,
+			Status:         "crash",
+		},
+	} {
+		if _, err := st.InsertRun(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 24h window should include the 2 recent buckets and exclude the 72h-old run.
+	tp, err := st.GetStats(ctx, StatsQueryThroughput, StatsWindow24h, "stats-proj", "")
+	if err != nil {
+		t.Fatalf("GetStats throughput 24h: %v", err)
+	}
+	if tp.Query != StatsQueryThroughput || tp.Window != StatsWindow24h || len(tp.Buckets) != 2 || tp.TotalRuns != 2 || tp.TotalExecs != 140000 {
+		t.Fatalf("unexpected 24h throughput stats: %+v", tp)
+	}
+	if tp.OKRuns != 1 || tp.CrashRuns != 1 || tp.MaxCoveragePct != 80.0 || tp.CorpusCount != 14 || tp.NewInteresting != 6 {
+		t.Fatalf("unexpected 24h summary counts: %+v", tp)
+	}
+
+	// 7d window should include all 3 runs across 3 buckets.
+	cov7d, err := st.GetStats(ctx, StatsQueryCoverage, StatsWindow7d, "", "FuzzStats")
+	if err != nil {
+		t.Fatalf("GetStats coverage 7d: %v", err)
+	}
+	if cov7d.Query != StatsQueryCoverage || cov7d.Window != StatsWindow7d || len(cov7d.Buckets) != 3 || cov7d.TotalRuns != 3 {
+		t.Fatalf("unexpected 7d coverage stats: %+v", cov7d)
+	}
+
+	// Invalid query or window fails with ErrInvalidStatsParam.
+	if _, err := st.GetStats(ctx, "unknown_query", StatsWindow24h, "", ""); err == nil {
+		t.Fatal("expected error for unknown query")
+	}
+	if _, err := st.GetStats(ctx, StatsQueryOutcomes, "99y", "", ""); err == nil {
+		t.Fatal("expected error for unknown window")
+	}
+}

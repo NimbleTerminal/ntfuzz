@@ -567,16 +567,30 @@ func ClassifyRoute(path string) string {
 		return "/api/crashes"
 	case "/api/coverage/history":
 		return "/api/coverage/history"
+	case "/api/stats":
+		return "/api/stats"
 	case "/api/status":
 		return "/api/status"
 	}
 	if strings.HasPrefix(path, "/static/") {
 		return "/static/*"
 	}
+	if isStatsQueryPath(path) {
+		return "/api/stats/{query}"
+	}
 	if isCrashFixPath(path) {
 		return "/api/crashes/{id}/fix"
 	}
 	return "other"
+}
+
+func isStatsQueryPath(path string) bool {
+	const prefix = "/api/stats/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	queryPart := strings.TrimPrefix(path, prefix)
+	return queryPart != "" && !strings.Contains(queryPart, "/")
 }
 
 func isCrashFixPath(path string) bool {

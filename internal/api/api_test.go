@@ -198,4 +198,24 @@ func TestAPIServerAndClient(t *testing.T) {
 	if len(history) != 1 || history[0].CoveragePct != 81.4 || history[0].CorpusCount != 19 {
 		t.Fatalf("unexpected history: %+v", history)
 	}
+
+	for _, q := range []string{StatsQueryThroughput, StatsQueryCoverage, StatsQueryOutcomes} {
+		stats, err := client.GetStats(ctx, q, StatsWindow24h, "demo-codec", "")
+		if err != nil {
+			t.Fatalf("GetStats(%s): %v", q, err)
+		}
+		if stats.Query != q || stats.Window != StatsWindow24h || stats.TotalRuns != 1 || stats.TotalExecs != 84000 || len(stats.Buckets) != 1 {
+			t.Fatalf("unexpected stats for %s: %+v", q, stats)
+		}
+	}
+
+	// Invalid stats query or window returns 400
+	badStatsResp, err := http.Get(ts.URL + "/api/stats/not-a-query?window=24h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = badStatsResp.Body.Close()
+	if badStatsResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid stats query, got %d", badStatsResp.StatusCode)
+	}
 }

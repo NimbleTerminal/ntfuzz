@@ -98,6 +98,9 @@ func (v *Viewer) Refresh() (err error) {
 	if _, e := db.ListTargets(ctx, ""); err == nil {
 		err = e
 	}
+	if _, e := db.GetStats(ctx, store.StatsQueryThroughput, store.StatsWindow24h, "", ""); err == nil {
+		err = e
+	}
 	if err != nil {
 		_ = db.Close()
 		return err

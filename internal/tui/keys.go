@@ -11,6 +11,7 @@ const (
 	ViewFleet ViewMode = iota
 	ViewDetail
 	ViewCrashes
+	ViewStats
 )
 
 func (v ViewMode) ContextName() string {
@@ -19,6 +20,8 @@ func (v ViewMode) ContextName() string {
 		return "detail"
 	case ViewCrashes:
 		return "crashes"
+	case ViewStats:
+		return "stats"
 	default:
 		return "fleet"
 	}
@@ -33,6 +36,8 @@ type KeyMap struct {
 	Project    key.Binding
 	Sort       key.Binding
 	SortDir    key.Binding
+	Graphs     key.Binding
+	Window     key.Binding
 	Crashes    key.Binding
 	FixCrash   key.Binding
 	Refresh    key.Binding
@@ -52,15 +57,27 @@ func NewKeyMap(mode ViewMode, hideHelp bool) KeyMap {
 	if mode == ViewCrashes {
 		crashesLabel = "Fleet targets"
 	}
+	graphsLabel := "Stats graphs"
+	if mode == ViewStats {
+		graphsLabel = "Fleet targets"
+	}
+	upLabel := "Move up"
+	downLabel := "Move down"
+	if mode == ViewStats {
+		upLabel = "Prev query"
+		downLabel = "Next query"
+	}
 
 	return KeyMap{
-		Up:         key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "Move up")),
-		Down:       key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "Move down")),
+		Up:         key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", upLabel)),
+		Down:       key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", downLabel)),
 		Enter:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "Target detail")),
 		Back:       key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "Back")),
 		Project:    key.NewBinding(key.WithKeys("p", "tab"), key.WithHelp("p/tab", "Filter project")),
 		Sort:       key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "Sort column")),
 		SortDir:    key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "Reverse sort")),
+		Graphs:     key.NewBinding(key.WithKeys("g"), key.WithHelp("g", graphsLabel)),
+		Window:     key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "Time window")),
 		Crashes:    key.NewBinding(key.WithKeys("c"), key.WithHelp("c", crashesLabel)),
 		FixCrash:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "Mark crash fixed")),
 		Refresh:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "Refresh now")),
@@ -75,11 +92,13 @@ func NewKeyMap(mode ViewMode, hideHelp bool) KeyMap {
 func (k KeyMap) ShortHelp() []key.Binding {
 	switch k.mode {
 	case ViewDetail:
-		return []key.Binding{k.Back, k.Up, k.Down, k.Refresh, k.Crashes, k.More}
+		return []key.Binding{k.Back, k.Up, k.Down, k.Graphs, k.Refresh, k.Crashes, k.More}
 	case ViewCrashes:
-		return []key.Binding{k.Enter, k.Back, k.Up, k.Down, k.FixCrash, k.Crashes, k.Refresh}
+		return []key.Binding{k.Enter, k.Back, k.Up, k.Down, k.FixCrash, k.Graphs, k.Crashes, k.Refresh}
+	case ViewStats:
+		return []key.Binding{k.Back, k.Up, k.Down, k.Window, k.Project, k.Graphs, k.Crashes, k.Refresh}
 	default:
-		return []key.Binding{k.Enter, k.Up, k.Down, k.Sort, k.Project, k.Crashes, k.Refresh}
+		return []key.Binding{k.Enter, k.Up, k.Down, k.Sort, k.Project, k.Graphs, k.Crashes, k.Refresh}
 	}
 }
 
@@ -88,18 +107,23 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	switch k.mode {
 	case ViewDetail:
 		return [][]key.Binding{
-			{k.Back, k.Up, k.Down},
+			{k.Back, k.Up, k.Down, k.Graphs},
 			{k.Refresh, k.Crashes, k.More, k.Visibility, k.Quit},
 		}
 	case ViewCrashes:
 		return [][]key.Binding{
 			{k.Enter, k.Back, k.Up, k.Down, k.FixCrash},
-			{k.Crashes, k.Refresh, k.More, k.Visibility, k.Quit},
+			{k.Graphs, k.Crashes, k.Refresh, k.More, k.Visibility, k.Quit},
+		}
+	case ViewStats:
+		return [][]key.Binding{
+			{k.Back, k.Up, k.Down, k.Window, k.Project},
+			{k.Graphs, k.Crashes, k.Refresh, k.More, k.Visibility, k.Quit},
 		}
 	default:
 		return [][]key.Binding{
 			{k.Enter, k.Up, k.Down, k.Sort, k.SortDir, k.Project},
-			{k.Crashes, k.Refresh, k.More, k.Visibility, k.Quit},
+			{k.Graphs, k.Crashes, k.Refresh, k.More, k.Visibility, k.Quit},
 		}
 	}
 }

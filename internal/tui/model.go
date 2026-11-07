@@ -41,6 +41,11 @@ type detailDataMsg struct {
 	err      error
 }
 
+type statsDataMsg struct {
+	stats api.StatsResponse
+	err   error
+}
+
 // SortColumn identifies the column used to sort the fleet target table.
 type SortColumn int
 
@@ -158,6 +163,11 @@ type Model struct {
 	detailHistory   []api.CoveragePoint
 	runsTable       table.Model
 	covSparkline    sparkline.Model
+
+	// Stats / Canned Queries state
+	statsQueryIdx  int
+	statsWindowIdx int
+	statsData      api.StatsResponse
 }
 
 // NewModel constructs a pure Bubble Tea Model backed by the HTTP API client.
@@ -215,6 +225,7 @@ func NewModelOptions(client *api.Client, refreshInterval time.Duration, readOnly
 		loading:         true,
 		runsTable:       rt,
 		covSparkline:    sp,
+		statsWindowIdx:  2, // "24h"
 	}
 }
 
@@ -261,6 +272,9 @@ func DescribeActions(inner tea.Model) bubblehelp.Description {
 			m.detailTarget.ProjectName, m.detailTarget.Name, m.detailTarget.CoveragePct, m.detailTarget.CorpusCount)
 	} else if m.mode == ViewCrashes {
 		summary = fmt.Sprintf("Open Crashes (%d)", len(m.openCrashes))
+	} else if m.mode == ViewStats {
+		q := m.currentStatsQuery()
+		summary = fmt.Sprintf("Stats: %s (%s)", q.Title, m.currentStatsWindow())
 	}
 
 	return bubblehelp.Description{
@@ -389,6 +403,22 @@ func (m Model) fixCrashCmd(crashID int64) tea.Cmd {
 	}
 }
 
+func (m Model) fetchStatsCmd() tea.Cmd {
+	client := m.client
+	q := m.currentStatsQuery().ID
+	w := m.currentStatsWindow()
+	proj := m.currentProjectFilter()
+	return func() tea.Msg {
+		if client == nil {
+			return statsDataMsg{}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		stats, err := client.GetStats(ctx, q, w, proj, "")
+		return statsDataMsg{stats: stats, err: err}
+	}
+}
+
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -408,6 +438,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{m.tickCmd(), m.fetchFleetCmd()}
 		if m.mode == ViewDetail && m.detailTarget != nil {
 			cmds = append(cmds, m.fetchDetailCmd(m.detailTarget.ID))
+		}
+		if m.mode == ViewStats {
+			cmds = append(cmds, m.fetchStatsCmd())
 		}
 		return m, tea.Batch(cmds...)
 
@@ -481,6 +514,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncDetailWidgets()
 		return m, nil
 
+	case statsDataMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.lastErr = msg.err
+			return m, nil
+		}
+		m.lastErr = nil
+		m.statsData = msg.stats
+		return m, nil
+
 	case tea.KeyPressMsg:
 		km := m.keyMap()
 		switch {
@@ -501,7 +544,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == ViewDetail && m.detailTarget != nil {
 				cmds = append(cmds, m.fetchDetailCmd(m.detailTarget.ID))
 			}
+			if m.mode == ViewStats {
+				cmds = append(cmds, m.fetchStatsCmd())
+			}
 			return m, tea.Batch(cmds...)
+
+		case key.Matches(msg, km.Graphs):
+			if m.mode == ViewStats {
+				m.mode = ViewFleet
+				return m, nil
+			}
+			m.mode = ViewStats
+			return m, m.fetchStatsCmd()
+
+		case key.Matches(msg, km.Window):
+			if m.mode == ViewStats {
+				m.statsWindowIdx = (m.statsWindowIdx + 1) % len(StatsWindows)
+				return m, m.fetchStatsCmd()
+			}
 
 		case key.Matches(msg, km.FixCrash):
 			if m.mode == ViewCrashes && len(m.openCrashes) > 0 && m.crashIdx < len(m.openCrashes) {
@@ -552,13 +612,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, km.Project):
-			if m.mode == ViewFleet {
+			if m.mode == ViewFleet || m.mode == ViewStats {
 				if len(m.projects) > 0 {
 					m.projectIdx = (m.projectIdx + 1) % (len(m.projects) + 1)
 				} else {
 					m.projectIdx = 0
 				}
 				m.selectedIdx = 0
+				if m.mode == ViewStats {
+					return m, tea.Batch(m.fetchFleetCmd(), m.fetchStatsCmd())
+				}
 				return m, m.fetchFleetCmd()
 			}
 
@@ -597,6 +660,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.crashIdx > 0 {
 					m.crashIdx--
 				}
+			case ViewStats:
+				m.statsQueryIdx = (m.statsQueryIdx - 1 + len(CannedQueries)) % len(CannedQueries)
+				return m, m.fetchStatsCmd()
 			case ViewDetail:
 				var cmd tea.Cmd
 				m.runsTable, cmd = m.runsTable.Update(msg)
@@ -614,6 +680,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.crashIdx < len(m.openCrashes)-1 {
 					m.crashIdx++
 				}
+			case ViewStats:
+				m.statsQueryIdx = (m.statsQueryIdx + 1) % len(CannedQueries)
+				return m, m.fetchStatsCmd()
 			case ViewDetail:
 				var cmd tea.Cmd
 				m.runsTable, cmd = m.runsTable.Update(msg)
@@ -809,6 +878,8 @@ func (m Model) View() tea.View {
 		b.WriteString(m.renderDetailView())
 	case ViewCrashes:
 		b.WriteString(m.renderCrashesView())
+	case ViewStats:
+		b.WriteString(m.renderStatsView())
 	default:
 		b.WriteString(m.renderFleetView())
 	}
@@ -1226,12 +1297,21 @@ func (m Model) renderSparklineSummary() string {
 	}
 	deltaCov := last.CoveragePct - first.CoveragePct
 	deltaCorp := last.CorpusCount - first.CorpusCount
-	statsLine := fmt.Sprintf("Now: %.1f%% (%+.1f%%)  •  Min/Max: %.1f%%–%.1f%%\nCorpus: %d → %d (%+d)",
+	statsLine := fmt.Sprintf("Now: %.1f%% (%+.1f%%)  •  Min/Max: %.1f%%–%.1f%%\nCorpus: %d → %d (%+d)  •  %s  %s",
 		last.CoveragePct, deltaCov, minCov, maxCov,
 		first.CorpusCount, last.CorpusCount, deltaCorp,
+		statusOKStyle.Render("● Cov%"),
+		statusRunningStyle.Render("● Corp"),
 	)
+	chartW := 44
+	if m.width >= 148 {
+		chartW = min(64, m.width-100)
+	} else if m.width < 110 {
+		chartW = max(24, m.width-10)
+	}
+	chartView := renderDetailHistoryChart(m.detailHistory, chartW, 6)
 	axisLine := subtleTextStyle.Render(fmt.Sprintf("oldest (#%d) ───────────► latest (#%d)", first.RunID, last.RunID))
-	return title + "\n" + subtleTextStyle.Render(statsLine) + "\n" + m.covSparkline.View() + "\n" + axisLine
+	return title + "\n" + subtleTextStyle.Render(statsLine) + "\n" + chartView + "\n" + axisLine
 }
 
 func (m Model) renderCrashesView() string {
