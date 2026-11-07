@@ -38,6 +38,7 @@ type KeyMap struct {
 	SortDir    key.Binding
 	Graphs     key.Binding
 	Window     key.Binding
+	Graphics   key.Binding
 	Crashes    key.Binding
 	FixCrash   key.Binding
 	Refresh    key.Binding
@@ -77,6 +78,7 @@ func NewKeyMap(mode ViewMode, hideHelp bool) KeyMap {
 		Sort:       key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "Sort column")),
 		SortDir:    key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "Reverse sort")),
 		Graphs:     key.NewBinding(key.WithKeys("g"), key.WithHelp("g", graphsLabel)),
+		Graphics:   key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "Kitty/text charts")),
 		Window:     key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "Time window")),
 		Crashes:    key.NewBinding(key.WithKeys("c"), key.WithHelp("c", crashesLabel)),
 		FixCrash:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "Mark crash fixed")),
@@ -96,7 +98,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 	case ViewCrashes:
 		return []key.Binding{k.Enter, k.Back, k.Up, k.Down, k.FixCrash, k.Graphs, k.Crashes, k.Refresh}
 	case ViewStats:
-		return []key.Binding{k.Back, k.Up, k.Down, k.Window, k.Project, k.Graphs, k.Crashes, k.Refresh}
+		return []key.Binding{k.Back, k.Up, k.Down, k.Window, k.Graphics, k.Project, k.Graphs, k.Crashes, k.Refresh}
 	default:
 		return []key.Binding{k.Enter, k.Up, k.Down, k.Sort, k.Project, k.Graphs, k.Crashes, k.Refresh}
 	}
@@ -117,7 +119,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		}
 	case ViewStats:
 		return [][]key.Binding{
-			{k.Back, k.Up, k.Down, k.Window, k.Project},
+			{k.Back, k.Up, k.Down, k.Window, k.Graphics, k.Project},
 			{k.Graphs, k.Crashes, k.Refresh, k.More, k.Visibility, k.Quit},
 		}
 	default:

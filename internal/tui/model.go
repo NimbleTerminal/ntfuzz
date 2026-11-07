@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"github.com/NimbleMarkets/ntcharts/picture/chartpicture/v2"
 	"slices"
 	"strconv"
 	"strings"
@@ -130,9 +131,14 @@ type crashFixedMsg struct {
 // Model is the shared Bubble Tea dashboard model for ntfuzz.
 // It communicates exclusively via the HTTP API client and never imports internal/store.
 type Model struct {
-	client          *api.Client
-	readOnly        bool
-	refreshInterval time.Duration
+	graphics                                chartpicture.Model
+	graphicsInitialized, graphicsRequested  bool
+	graphicsSupported, graphicsProbeExpired bool
+	graphicsID                              int
+	graphicsKey                             string
+	client                                  *api.Client
+	readOnly                                bool
+	refreshInterval                         time.Duration
 
 	width    int
 	height   int
@@ -421,7 +427,7 @@ func (m Model) fetchStatsCmd() tea.Cmd {
 }
 
 // Update implements tea.Model.
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
@@ -516,6 +522,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case statsDataMsg:
+		if msg.stats.Query != "" && (msg.stats.Query != m.currentStatsQuery().ID || msg.stats.Window != m.currentStatsWindow() || msg.stats.Project != m.currentProjectFilter()) {
+			return m, nil
+		}
 		m.loading = false
 		if msg.err != nil {
 			m.lastErr = msg.err
@@ -625,6 +634,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		case key.Matches(msg, km.Graphics):
+			if m.mode == ViewStats {
+				cmd := m.toggleGraphics()
+				return m, cmd
+			}
 		case key.Matches(msg, km.Project):
 			m.revisionPage = 0
 			if m.mode == ViewFleet || m.mode == ViewStats {

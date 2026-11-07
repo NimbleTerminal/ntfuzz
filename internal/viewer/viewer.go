@@ -107,6 +107,9 @@ func (v *Viewer) Refresh() (err error) {
 	if err == nil {
 		_, err = db.ListCrashReplays(ctx)
 	}
+	if err == nil {
+		_, err = db.GetBurndown(ctx, store.StatsWindow24h, "", "")
+	}
 	if err != nil {
 		_ = db.Close()
 		return err

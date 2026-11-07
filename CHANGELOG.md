@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Crash burndown and Kitty charts**: record crash lifecycle events, chart the unresolved backlog with reconstructed-history labeling, and add an `i` toggle for ntcharts Kitty rendering in all graph views with per-session capability checks and text fallback.
+
 - **Revision and recovery tracking**: durable revision observations, a Revisions & Recovery graph/table, and saved-crash replay on changed revisions. Only an executed, passing reproducer closes an old crash; blocked checks retain it and recurrences reopen it. Schema v4 preserves existing data and labels current checkouts as baselines.
 
 - **TUI column sorting**: press `s` in the fleet view to cycle the sort column (`STATUS`, `PROJECT`, `TARGET`, `CRASH`, `EXECS/SEC`, `LAST RUN`, `COV %`, `REVISION`, `CORP`) and `S` to reverse sort direction, with `▲`/`▼` indicators in column headers and the filter bar.

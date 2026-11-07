@@ -34,3 +34,5 @@ Target filters accept numeric ID, target name, or project-qualified target name 
 Public snapshot viewers expose no mutation endpoint. Private live servers also support POST /api/crashes/{id}/fix; marking a crash fixed changes stored state and is not needed to investigate it. This read API description does not advertise that operator action as a read operation.
 
 Revision/recovery tracking: GET /api/stats/revisions?window=24h; GET /api/crash-replays for saved-input checks. Baselines are not new commits; replay pass means the saved input no longer reproduces.
+
+GET /api/stats/burndown returns open-crash backlog and new/reopened/resolved counts. history_estimated_before labels reconstructed older history. Graphs support per-terminal Kitty image rendering with the i key and text fallback.

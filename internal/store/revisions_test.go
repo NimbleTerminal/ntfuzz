@@ -155,7 +155,7 @@ func TestRevisionMigrationFromV3(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Restore the exact v3 table set while preserving the existing fleet/run data.
-	if _, err = s.db.Exec(`DROP TABLE revisions; DROP TABLE revision_targets; DROP TABLE crash_replays; DELETE FROM schema_migrations WHERE version=4`); err != nil {
+	if _, err = s.db.Exec(`DROP TABLE revisions; DROP TABLE revision_targets; DROP TABLE crash_replays; DELETE FROM schema_migrations WHERE version>=4`); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Close(); err != nil {

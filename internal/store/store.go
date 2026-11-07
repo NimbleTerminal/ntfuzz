@@ -15,7 +15,7 @@ import (
 )
 
 // CurrentSchemaVersion tracks the DuckDB schema version.
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // ErrNotFound is returned when a requested record does not exist.
 var ErrNotFound = errors.New("record not found")
@@ -165,6 +165,7 @@ const (
 	StatsQueryCoverage   = "coverage"
 	StatsQueryOutcomes   = "outcomes"
 	StatsQueryRevisions  = "revisions"
+	StatsQueryBurndown   = "burndown"
 )
 
 // Supported time window identifiers for canned stats queries.
@@ -181,6 +182,10 @@ var ErrInvalidStatsParam = errors.New("invalid stats parameter")
 
 // StatsBucket represents a single time-bucketed aggregation over fuzz runs.
 type StatsBucket struct {
+	OpenCrashes       int       `json:"open_crashes"`
+	NewCrashes        int       `json:"new_crashes"`
+	ReopenedCrashes   int       `json:"reopened_crashes"`
+	ResolvedCrashes   int       `json:"resolved_crashes"`
 	DetectedRevisions int       `json:"detected_revisions"`
 	TestedRevisions   int       `json:"tested_revisions"`
 	BucketStart       time.Time `json:"bucket_start"`
@@ -202,26 +207,31 @@ type StatsBucket struct {
 
 // StatsSeries holds time-bucketed metrics and window summary totals for a canned stats query.
 type StatsSeries struct {
-	Revisions      []Revision    `json:"revisions,omitempty"`
-	Query          string        `json:"query"`
-	Window         string        `json:"window"`
-	BucketSeconds  int           `json:"bucket_seconds"`
-	Project        string        `json:"project,omitempty"`
-	Target         string        `json:"target,omitempty"`
-	TotalRuns      int           `json:"total_runs"`
-	TotalExecs     int64         `json:"total_execs"`
-	AvgExecsPerSec float64       `json:"avg_execs_per_sec"`
-	PeakExecsSec   float64       `json:"peak_execs_per_sec"`
-	AvgCoveragePct float64       `json:"avg_coverage_pct"`
-	MaxCoveragePct float64       `json:"max_coverage_pct"`
-	NewInteresting int           `json:"new_interesting"`
-	CorpusCount    int           `json:"corpus_count"`
-	OKRuns         int           `json:"ok_runs"`
-	CrashRuns      int           `json:"crash_runs"`
-	ErrorRuns      int           `json:"error_runs"`
-	IncompleteRuns int           `json:"incomplete_runs"`
-	CanceledRuns   int           `json:"canceled_runs"`
-	Buckets        []StatsBucket `json:"buckets"`
+	HistoryEstimatedBefore *time.Time    `json:"history_estimated_before,omitempty"`
+	OpenCrashes            int           `json:"open_crashes"`
+	NewCrashes             int           `json:"new_crashes"`
+	ReopenedCrashes        int           `json:"reopened_crashes"`
+	ResolvedCrashes        int           `json:"resolved_crashes"`
+	Revisions              []Revision    `json:"revisions,omitempty"`
+	Query                  string        `json:"query"`
+	Window                 string        `json:"window"`
+	BucketSeconds          int           `json:"bucket_seconds"`
+	Project                string        `json:"project,omitempty"`
+	Target                 string        `json:"target,omitempty"`
+	TotalRuns              int           `json:"total_runs"`
+	TotalExecs             int64         `json:"total_execs"`
+	AvgExecsPerSec         float64       `json:"avg_execs_per_sec"`
+	PeakExecsSec           float64       `json:"peak_execs_per_sec"`
+	AvgCoveragePct         float64       `json:"avg_coverage_pct"`
+	MaxCoveragePct         float64       `json:"max_coverage_pct"`
+	NewInteresting         int           `json:"new_interesting"`
+	CorpusCount            int           `json:"corpus_count"`
+	OKRuns                 int           `json:"ok_runs"`
+	CrashRuns              int           `json:"crash_runs"`
+	ErrorRuns              int           `json:"error_runs"`
+	IncompleteRuns         int           `json:"incomplete_runs"`
+	CanceledRuns           int           `json:"canceled_runs"`
+	Buckets                []StatsBucket `json:"buckets"`
 }
 
 // Open opens or creates a DuckDB database at path (use "" or ":memory:" for in-memory)
@@ -387,6 +397,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`INSERT INTO revision_targets SELECT t.project_id,r.git_sha,r.target_id,MIN(r.started),COUNT(*),COUNT(*) FILTER(WHERE r.status='ok'),COUNT(*) FILTER(WHERE r.status='crash'),COUNT(*) FILTER(WHERE r.status NOT IN ('ok','crash')) FROM runs r JOIN targets t ON t.id=r.target_id WHERE COALESCE(r.git_sha,'')<>'' AND NOT COALESCE(r.dirty,false) GROUP BY t.project_id,r.git_sha,r.target_id ON CONFLICT DO NOTHING`,
 	}})
 
+	migrations = append(migrations, migration{version: 5, stmts: []string{crashEventSchema}})
 	for _, m := range migrations {
 		if m.version <= currentVersion {
 			continue
@@ -709,16 +720,22 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 		lastSeen = lastSeen.UTC()
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
 	var existingID int64
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM crashes
+	var fixed sql.NullTime
+	err = tx.QueryRowContext(ctx,
+		`SELECT id,fixed_at FROM crashes
 		 WHERE target_id = ? AND (input_hash = ? OR (? != '' AND stack_fingerprint = ?))
 		 ORDER BY id ASC LIMIT 1`,
 		c.TargetID, c.InputHash, c.StackFingerprint, c.StackFingerprint,
-	).Scan(&existingID)
+	).Scan(&existingID, &fixed)
 	if errors.Is(err, sql.ErrNoRows) {
 		var id int64
-		err = s.db.QueryRowContext(ctx,
+		err = tx.QueryRowContext(ctx,
 			`INSERT INTO crashes (
 				target_id, first_seen, last_seen, fixed_at, stack, stack_fingerprint,
 				input_hash, minimized_input, issue_url, git_sha, dirty, go_version
@@ -729,13 +746,17 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("insert crash: %w", err)
 		}
-		return id, nil
+		_, err = tx.ExecContext(ctx, `INSERT INTO crash_events(crash_id,event_at,kind,delta) VALUES(?,?,'new',1)`, id, firstSeen)
+		if err != nil {
+			return 0, err
+		}
+		return id, tx.Commit()
 	}
 	if err != nil {
 		return 0, fmt.Errorf("query existing crash: %w", err)
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
 		`UPDATE crashes
 		 SET last_seen = ?,
 		     fixed_at = NULL,
@@ -758,7 +779,13 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("update crash %d: %w", existingID, err)
 	}
-	return existingID, nil
+	if fixed.Valid {
+		_, err = tx.ExecContext(ctx, `INSERT INTO crash_events(crash_id,event_at,kind,delta) VALUES(?,?,'reopened',1)`, existingID, lastSeen)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return existingID, tx.Commit()
 }
 
 // MarkCrashFixed marks a crash as fixed at fixedAt and optionally sets issueURL.
@@ -775,9 +802,18 @@ func (s *Store) MarkCrashFixed(ctx context.Context, crashID int64, fixedAt time.
 		fixedAt = fixedAt.UTC()
 	}
 
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO crash_events(crash_id,event_at,kind,delta) SELECT id,CAST(? AS TIMESTAMP),'resolved',-1 FROM crashes WHERE id=? AND fixed_at IS NULL`, fixedAt.UTC().Format("2006-01-02 15:04:05.999999"), crashID)
+	if err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
 		`UPDATE crashes
-		 SET fixed_at = ?,
+		 SET fixed_at = COALESCE(fixed_at, ?),
 		     issue_url = CASE WHEN ? != '' THEN ? ELSE issue_url END
 		 WHERE id = ?`,
 		fixedAt, issueURL, issueURL, crashID,
@@ -789,7 +825,7 @@ func (s *Store) MarkCrashFixed(ctx context.Context, crashID int64, fixedAt time.
 	if affected == 0 {
 		return fmt.Errorf("crash %d: %w", crashID, ErrNotFound)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // PruneOldRuns deletes raw runs older than retention while preserving at least the most recent
@@ -1178,8 +1214,10 @@ func ParseStatsQuery(raw string) (string, error) {
 		return StatsQueryOutcomes, nil
 	case StatsQueryRevisions:
 		return StatsQueryRevisions, nil
+	case StatsQueryBurndown:
+		return StatsQueryBurndown, nil
 	default:
-		return "", fmt.Errorf("%w: unknown query %q (expected throughput, coverage, outcomes, or revisions)", ErrInvalidStatsParam, raw)
+		return "", fmt.Errorf("%w: unknown query %q (expected throughput, coverage, outcomes, revisions, or burndown)", ErrInvalidStatsParam, raw)
 	}
 }
 
@@ -1209,6 +1247,9 @@ func (s *Store) GetStats(ctx context.Context, queryName, windowName, projectFilt
 	qName, err := ParseStatsQuery(queryName)
 	if err != nil {
 		return StatsSeries{}, err
+	}
+	if qName == StatsQueryBurndown {
+		return s.GetBurndown(ctx, windowName, projectFilter, targetFilter)
 	}
 	if qName == StatsQueryRevisions {
 		if targetFilter != "" {

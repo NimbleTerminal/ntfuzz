@@ -268,7 +268,7 @@
           {
             "name": "query",
             "in": "path",
-            "description": "Canned query: throughput, coverage, outcomes, or revisions.",
+            "description": "Canned query: throughput, coverage, outcomes, revisions, or burndown.",
             "required": true,
             "schema": {
               "type": "string",
@@ -276,7 +276,8 @@
                 "throughput",
                 "coverage",
                 "outcomes",
-                "revisions"
+                "revisions",
+                "burndown"
               ],
               "default": "throughput"
             }
@@ -972,6 +973,18 @@
           },
           "tested_revisions": {
             "type": "integer"
+          },
+          "open_crashes": {
+            "type": "integer"
+          },
+          "new_crashes": {
+            "type": "integer"
+          },
+          "reopened_crashes": {
+            "type": "integer"
+          },
+          "resolved_crashes": {
+            "type": "integer"
           }
         },
         "required": [
@@ -991,7 +1004,11 @@
           "incomplete_runs",
           "canceled_runs",
           "detected_revisions",
-          "tested_revisions"
+          "tested_revisions",
+          "open_crashes",
+          "new_crashes",
+          "reopened_crashes",
+          "resolved_crashes"
         ]
       },
       "StatsResponse": {
@@ -1076,6 +1093,23 @@
             "items": {
               "$ref": "#/components/schemas/Revision"
             }
+          },
+          "open_crashes": {
+            "type": "integer"
+          },
+          "new_crashes": {
+            "type": "integer"
+          },
+          "reopened_crashes": {
+            "type": "integer"
+          },
+          "resolved_crashes": {
+            "type": "integer"
+          },
+          "history_estimated_before": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Crash history before this time is reconstructed from retained first_seen/fixed_at records, not a complete transition log."
           }
         },
         "required": [
@@ -1095,7 +1129,11 @@
           "error_runs",
           "incomplete_runs",
           "canceled_runs",
-          "buckets"
+          "buckets",
+          "open_crashes",
+          "new_crashes",
+          "reopened_crashes",
+          "resolved_crashes"
         ]
       },
       "Error": {

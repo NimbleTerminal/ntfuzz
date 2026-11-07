@@ -274,6 +274,7 @@ const (
 	StatsQueryCoverage   = store.StatsQueryCoverage
 	StatsQueryOutcomes   = store.StatsQueryOutcomes
 	StatsQueryRevisions  = store.StatsQueryRevisions
+	StatsQueryBurndown   = store.StatsQueryBurndown
 )
 
 // Supported time window identifiers for GET /api/stats and GET /api/stats/{query}.
@@ -287,6 +288,10 @@ const (
 
 // StatsBucket is the JSON wire representation of a single time-bucketed stats point.
 type StatsBucket struct {
+	OpenCrashes       int       `json:"open_crashes"`
+	NewCrashes        int       `json:"new_crashes"`
+	ReopenedCrashes   int       `json:"reopened_crashes"`
+	ResolvedCrashes   int       `json:"resolved_crashes"`
 	DetectedRevisions int       `json:"detected_revisions"`
 	TestedRevisions   int       `json:"tested_revisions"`
 	BucketStart       time.Time `json:"bucket_start"`
@@ -308,7 +313,7 @@ type StatsBucket struct {
 
 // StatsBucketFromStore converts a store.StatsBucket into an API StatsBucket DTO.
 func StatsBucketFromStore(b store.StatsBucket) StatsBucket {
-	return StatsBucket{DetectedRevisions: b.DetectedRevisions, TestedRevisions: b.TestedRevisions,
+	return StatsBucket{OpenCrashes: b.OpenCrashes, NewCrashes: b.NewCrashes, ReopenedCrashes: b.ReopenedCrashes, ResolvedCrashes: b.ResolvedCrashes, DetectedRevisions: b.DetectedRevisions, TestedRevisions: b.TestedRevisions,
 		BucketStart:    b.BucketStart,
 		Runs:           b.Runs,
 		Execs:          b.Execs,
@@ -329,26 +334,31 @@ func StatsBucketFromStore(b store.StatsBucket) StatsBucket {
 
 // StatsResponse is returned by GET /api/stats and GET /api/stats/{query}.
 type StatsResponse struct {
-	Revisions      []Revision    `json:"revisions,omitempty"`
-	Query          string        `json:"query"`
-	Window         string        `json:"window"`
-	BucketSeconds  int           `json:"bucket_seconds"`
-	Project        string        `json:"project,omitempty"`
-	Target         string        `json:"target,omitempty"`
-	TotalRuns      int           `json:"total_runs"`
-	TotalExecs     int64         `json:"total_execs"`
-	AvgExecsPerSec float64       `json:"avg_execs_per_sec"`
-	PeakExecsSec   float64       `json:"peak_execs_per_sec"`
-	AvgCoveragePct float64       `json:"avg_coverage_pct"`
-	MaxCoveragePct float64       `json:"max_coverage_pct"`
-	NewInteresting int           `json:"new_interesting"`
-	CorpusCount    int           `json:"corpus_count"`
-	OKRuns         int           `json:"ok_runs"`
-	CrashRuns      int           `json:"crash_runs"`
-	ErrorRuns      int           `json:"error_runs"`
-	IncompleteRuns int           `json:"incomplete_runs"`
-	CanceledRuns   int           `json:"canceled_runs"`
-	Buckets        []StatsBucket `json:"buckets"`
+	HistoryEstimatedBefore *time.Time    `json:"history_estimated_before,omitempty"`
+	OpenCrashes            int           `json:"open_crashes"`
+	NewCrashes             int           `json:"new_crashes"`
+	ReopenedCrashes        int           `json:"reopened_crashes"`
+	ResolvedCrashes        int           `json:"resolved_crashes"`
+	Revisions              []Revision    `json:"revisions,omitempty"`
+	Query                  string        `json:"query"`
+	Window                 string        `json:"window"`
+	BucketSeconds          int           `json:"bucket_seconds"`
+	Project                string        `json:"project,omitempty"`
+	Target                 string        `json:"target,omitempty"`
+	TotalRuns              int           `json:"total_runs"`
+	TotalExecs             int64         `json:"total_execs"`
+	AvgExecsPerSec         float64       `json:"avg_execs_per_sec"`
+	PeakExecsSec           float64       `json:"peak_execs_per_sec"`
+	AvgCoveragePct         float64       `json:"avg_coverage_pct"`
+	MaxCoveragePct         float64       `json:"max_coverage_pct"`
+	NewInteresting         int           `json:"new_interesting"`
+	CorpusCount            int           `json:"corpus_count"`
+	OKRuns                 int           `json:"ok_runs"`
+	CrashRuns              int           `json:"crash_runs"`
+	ErrorRuns              int           `json:"error_runs"`
+	IncompleteRuns         int           `json:"incomplete_runs"`
+	CanceledRuns           int           `json:"canceled_runs"`
+	Buckets                []StatsBucket `json:"buckets"`
 }
 
 // StatsResponseFromStore converts a store.StatsSeries into an API StatsResponse DTO.
@@ -357,7 +367,7 @@ func StatsResponseFromStore(s store.StatsSeries) StatsResponse {
 	for _, b := range s.Buckets {
 		buckets = append(buckets, StatsBucketFromStore(b))
 	}
-	return StatsResponse{Revisions: s.Revisions,
+	return StatsResponse{HistoryEstimatedBefore: s.HistoryEstimatedBefore, OpenCrashes: s.OpenCrashes, NewCrashes: s.NewCrashes, ReopenedCrashes: s.ReopenedCrashes, ResolvedCrashes: s.ResolvedCrashes, Revisions: s.Revisions,
 		Query:          s.Query,
 		Window:         s.Window,
 		BucketSeconds:  s.BucketSeconds,

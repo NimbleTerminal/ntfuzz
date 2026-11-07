@@ -31,7 +31,7 @@
   - `GET /api/crashes?open=true` — open (or all) crashes with stack traces, stack fingerprints, and durable corpus paths
   - `POST /api/crashes/{id}/fix` — mark a crash fixed (and optionally attach `issue_url`)
   - `GET /api/coverage/history?target=...` — chronological coverage & corpus growth series
-  - `GET /api/stats/{query}?window=24h&project=...` — canned time-bucketed analytical queries (`throughput`, `coverage`, `outcomes`, `revisions`) over `1h`, `6h`, `24h`, `7d`, or `14d`
+  - `GET /api/stats/{query}?window=24h&project=...` — canned time-bucketed analytical queries (`throughput`, `coverage`, `outcomes`, `revisions`, `burndown`) over `1h`, `6h`, `24h`, `7d`, or `14d`
   - `GET /api/status` — fleet health, 24h run counts, schema version, and active worker jobs
 - **Shared Bubble Tea TUI + Booba Browser Bridge**:
   - The TUI talks strictly to the HTTP API DTOs in `internal/api` (never imports `internal/store` or opens DuckDB directly).
@@ -126,7 +126,7 @@ projects:
 | `enter` | Target detail | Open selected target's run history, `ntcharts` coverage sparkline, and crashes |
 | `esc` / `backspace` | Back to fleet | Return to the main fleet overview |
 | `p` / `tab` | Filter project | Cycle through projects (`All Projects` → project 1 → ...) |
-| `g` | Stats graphs | Toggle the canned time-series `ntcharts` view (`throughput`, `coverage`, `outcomes`, `revisions`) |
+| `g` | Stats graphs | Toggle the canned time-series `ntcharts` view (`throughput`, `coverage`, `outcomes`, `revisions`, `burndown`) |
 | `w` | Time window | Cycle time window (`1h` → `6h` → `24h` → `7d` → `14d`) in Stats view |
 | `c` | Open crashes | Toggle the fleet-wide open crashes view |
 | `x` | Mark crash fixed | Mark the selected open crash as fixed (in Crashes view) |
@@ -407,3 +407,27 @@ input and revision. Replays have a 45-second timeout and use the existing worker
 and module scheduling limits. Replay details are available at `GET /api/crash-replays`;
 revision progress is at `GET /api/stats/revisions?window=24h&project=...`.
 Both endpoints are also available in the read-only snapshot viewer.
+
+### Crash burndown and Kitty graphics
+
+In Graphs (`g`), use up/down to choose **Crash Burndown**. It tracks open crash
+backlog and counts new, reopened, and resolved crashes for the chosen window and
+project. State transitions are recorded transactionally with crash changes, so
+repeated reports and repeated resolution requests do not inflate the chart.
+Schema v5 reconstructs older history from retained `first_seen` / `fixed_at`
+records; the chart/API explicitly mark the time before which intermediate
+historical transitions may be missing. New lifecycle events survive run pruning.
+The same data is available from `GET /api/stats/burndown?window=24h&project=...`.
+
+Press **i** in any graph to toggle **Kitty graphics / text charts**. Image charts
+use ntcharts `chartpicture` v2.9.0. Each terminal session is probed separately
+before transmitting chart images; unsupported or nonresponding terminals retain
+the text charts. This also applies to browser terminals: support depends on the
+browser's terminal renderer and transport. Resize and cell-size messages are
+forwarded to the widget, and leaving the graph or toggling back removes the image.
+The revision table remains text in either mode.
+
+For native terminals where capability replies are blocked, the ntcharts override
+`NTCHARTS_KITTY=supported` explicitly enables graphics; use `unsupported` to disable
+them. Under tmux, enable its `allow-passthrough` setting. ntcharts' existing
+`NTCHARTS_TMUX_PASSTHROUGH` setting controls passthrough wrapping.

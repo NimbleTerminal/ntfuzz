@@ -40,6 +40,7 @@ var CannedQueries = []CannedQuery{
 		Subtitle: "Completed runs per time bucket by outcome (OK, Crash, Error/Incomplete, Canceled)",
 	},
 	{ID: api.StatsQueryRevisions, Title: "Revisions & Recovery", Subtitle: "Observed revisions, fuzz progress, and saved-crash verification"},
+	{ID: api.StatsQueryBurndown, Title: "Crash Burndown", Subtitle: "Unresolved crashes and lifecycle changes over time"},
 }
 
 // StatsWindows lists the supported lookback time windows in cycling order.
@@ -106,6 +107,7 @@ func (m Model) renderStatsView() string {
 		strings.Join(wTabs, " "),
 		cardValueStyle.Render(projLabel),
 	)
+	controls = "Render: " + m.graphicsLabel() + " • " + controls
 	b.WriteString(ansi.Truncate(controls, contentWidth, "…") + "\n")
 
 	activeQ := m.currentStatsQuery()
@@ -161,6 +163,20 @@ func (m Model) renderStatsView() string {
 	}
 
 	switch activeQ.ID {
+	case api.StatsQueryBurndown:
+		b.WriteString(ansi.Truncate(fmt.Sprintf("Open: %d • New: %d • Reopened: %d • Resolved: %d", stats.OpenCrashes, stats.NewCrashes, stats.ReopenedCrashes, stats.ResolvedCrashes), contentWidth, "…") + "\n")
+		points := make([]timeserieslinechart.TimePoint, 0, len(stats.Buckets))
+		for _, bk := range stats.Buckets {
+			points = append(points, timeserieslinechart.TimePoint{Time: bk.BucketStart, Value: float64(bk.OpenCrashes)})
+		}
+		chartStr := renderDualTimeSeriesChart(chartW, chartH, points, nil, statusCrashStyle, statusOKStyle, func(_ int, v float64) string { return fmt.Sprintf("%.0f", v) }, func(_ int, v float64) string { return fmt.Sprintf("%.0f", v) }, 0, 0)
+		b.WriteString(m.graphOrText(chartStr) + "\n")
+		note := "Open crash backlog at the end of each bucket (UTC)"
+		if stats.HistoryEstimatedBefore != nil {
+			note += " • before " + stats.HistoryEstimatedBefore.UTC().Format("01-02 15:04") + " reconstructed"
+		}
+		b.WriteString(ansi.Truncate(note, contentWidth, "…"))
+
 	case api.StatsQueryCoverage:
 		summary := fmt.Sprintf("Avg Coverage: %.1f%%  •  Max Coverage: %.1f%%  •  Max Corpus: %d  •  +New Inputs: +%d  •  Buckets: %d",
 			stats.AvgCoveragePct, stats.MaxCoveragePct, stats.CorpusCount, stats.NewInteresting, len(stats.Buckets))
@@ -181,7 +197,7 @@ func (m Model) renderStatsView() string {
 			func(_ int, v float64) string { return formatCompactNumber(v) },
 			0, 100,
 		)
-		b.WriteString(chartStr + "\n")
+		b.WriteString(m.graphOrText(chartStr) + "\n")
 		legend := statusOKStyle.Render("● Avg Coverage % (left axis)") + "   " +
 			statusRunningStyle.Render("● Corpus Count (right axis)") + "   " +
 			subtleTextStyle.Render(fmt.Sprintf("(%s → %s UTC)",
@@ -195,7 +211,7 @@ func (m Model) renderStatsView() string {
 		b.WriteString(ansi.Truncate(summary, contentWidth, "…") + "\n")
 
 		chartStr := renderOutcomesBarChart(chartW, chartH, stats.Buckets, activeWin)
-		b.WriteString(chartStr + "\n")
+		b.WriteString(m.graphOrText(chartStr) + "\n")
 		legend := statusOKStyle.Render("■ OK") + "   " +
 			statusCrashStyle.Render("■ Crash") + "   " +
 			statusWarnStyle.Render("■ Error/Incomplete") + "   " +
@@ -230,7 +246,7 @@ func (m Model) renderStatsView() string {
 			func(_ int, v float64) string { return formatCompactNumber(v) },
 			0, 0,
 		)
-		b.WriteString(chartStr + "\n")
+		b.WriteString(m.graphOrText(chartStr) + "\n")
 		legend := statusRunningStyle.Render("● Avg Execs/sec (left axis)") + "   " +
 			statusOKStyle.Render("● Execs per Bucket (right axis)") + "   " +
 			subtleTextStyle.Render(fmt.Sprintf("(%s → %s UTC)",
@@ -491,7 +507,7 @@ func (m Model) renderRevisionStats(width, height int) string {
 	}
 	chart := barchart.New(max(12, width), chartHeight, barchart.WithStyles(subtleTextStyle, subtleTextStyle), barchart.WithDataSet(bars))
 	chart.Draw()
-	b.WriteString(clampLinesWidth(chart.View(), width) + "\n")
+	b.WriteString(m.graphOrText(clampLinesWidth(chart.View(), width)) + "\n")
 	b.WriteString(ansi.Truncate("Detected revisions: awaiting fuzz (blue) + fuzzed (green); baselines excluded", width, "…") + "\n")
 	if len(stats.Revisions) == 0 {
 		b.WriteString("No revision observations in this window.\n")

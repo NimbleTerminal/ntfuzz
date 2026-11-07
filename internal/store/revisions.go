@@ -172,8 +172,16 @@ func (s *Store) RecordReplay(ctx context.Context, c Crash, r CrashReplay) error 
 		return err
 	}
 	if r.Outcome == "passed" {
-		_, err = tx.ExecContext(ctx, `UPDATE crashes SET fixed_at=? WHERE id=? AND input_hash=? AND last_seen<=?`, r.CheckedAt, c.ID, c.InputHash, r.CheckedAt)
+		_, err = tx.ExecContext(ctx, `INSERT INTO crash_events(crash_id,event_at,kind,delta) SELECT id,CAST(? AS TIMESTAMP),'resolved',-1 FROM crashes WHERE id=? AND input_hash=? AND last_seen<=? AND fixed_at IS NULL`, r.CheckedAt.UTC().Format("2006-01-02 15:04:05.999999"), c.ID, c.InputHash, r.CheckedAt)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE crashes SET fixed_at=COALESCE(fixed_at,?) WHERE id=? AND input_hash=? AND last_seen<=?`, r.CheckedAt, c.ID, c.InputHash, r.CheckedAt)
 	} else if r.Outcome == "failed" {
+		_, err = tx.ExecContext(ctx, `INSERT INTO crash_events(crash_id,event_at,kind,delta) SELECT id,CAST(? AS TIMESTAMP),'reopened',1 FROM crashes WHERE id=? AND input_hash=? AND fixed_at IS NOT NULL`, r.CheckedAt.UTC().Format("2006-01-02 15:04:05.999999"), c.ID, c.InputHash)
+		if err != nil {
+			return err
+		}
 		_, err = tx.ExecContext(ctx, `UPDATE crashes SET fixed_at=NULL WHERE id=? AND input_hash=?`, c.ID, c.InputHash)
 	}
 	if err != nil {
