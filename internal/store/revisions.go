@@ -60,7 +60,8 @@ func (s *Store) recordRevisionLocked(ctx context.Context, id int64, in ProjectSy
 	return err
 }
 
-// GetRevisionStats returns observations in the selected window and their progress.
+// GetRevisionStats returns observations in the selected window plus each current
+// revision, so quiet repositories retain visible sync health.
 // Target filtering is intentionally unsupported: revisions belong to projects.
 func (s *Store) GetRevisionStats(ctx context.Context, window, project string) (StatsSeries, error) {
 	win, seconds, lookback, _, err := ParseStatsWindow(window)
@@ -83,7 +84,7 @@ func (s *Store) GetRevisionStats(ctx context.Context, window, project string) (S
  (SELECT COUNT(*) FROM crash_replays r JOIN crashes c ON c.id=r.crash_id JOIN targets t ON t.id=c.target_id WHERE t.project_id=p.id AND r.git_sha=v.git_sha AND r.input_hash=c.input_hash AND r.outcome='blocked'),
  (SELECT COUNT(*) FROM crashes c JOIN targets t ON t.id=c.target_id WHERE t.project_id=p.id AND COALESCE(c.git_sha,'')<>v.git_sha AND NOT EXISTS(SELECT 1 FROM crash_replays r WHERE r.crash_id=c.id AND r.git_sha=v.git_sha AND r.input_hash=c.input_hash))
  FROM revisions v JOIN projects p ON p.id=v.project_id
- WHERE v.detected_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - %s AND (?='' OR p.name=? OR CAST(p.id AS VARCHAR)=?)
+ WHERE (v.detected_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - %s OR v.git_sha=p.git_sha) AND (?='' OR p.name=? OR CAST(p.id AS VARCHAR)=?)
  ORDER BY v.detected_at DESC, p.name`, lookback), project, project, project)
 	if err != nil {
 		return StatsSeries{}, err

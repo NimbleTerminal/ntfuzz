@@ -42,7 +42,7 @@ type scheduledTarget struct {
 	checkout  CheckoutInfo
 	target    DiscoveredTarget
 	targetID  int64
-	priority  int // lower runs first (0 = never run or recently added corpus, >0 = flat streak)
+	priority  int // lower runs first (-1 = pending replay, 0 = active, >0 = flat streak)
 }
 
 func (s scheduledTarget) effectiveModuleDir() string {
@@ -195,6 +195,7 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 		}
 
 		// Removed/renamed targets cannot verify old inputs; keep their crashes open.
+		replayDue := map[int64]bool{}
 		oldCrashes, listErr := o.store.ListCrashes(ctx, false, "")
 		if listErr != nil {
 			o.logger.Warn("list missing-target replays failed", "err", listErr)
@@ -203,11 +204,12 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 			if c.ProjectName != proj.Name || c.GitSHA == checkout.GitSHA {
 				continue
 			}
-			if _, present := reconciledIDs[store.TargetKey{Package: c.Package, Name: c.TargetName}]; present {
-				continue
-			}
 			needed, e := o.store.NeedsReplay(ctx, c, checkout.GitSHA)
 			if e != nil || !needed {
+				continue
+			}
+			if _, present := reconciledIDs[store.TargetKey{Package: c.Package, Name: c.TargetName}]; present {
+				replayDue[c.TargetID] = true
 				continue
 			}
 			if e = o.store.RecordReplay(ctx, c, store.CrashReplay{GitSHA: checkout.GitSHA, CheckedAt: time.Now().UTC(), Outcome: "blocked", Diagnostic: "Target is no longer discovered on this revision"}); e != nil {
@@ -229,13 +231,17 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 			if tID == 0 {
 				continue
 			}
+			priority := o.targetPriority(tID)
+			if replayDue[tID] {
+				priority = -1
+			}
 			scheduled = append(scheduled, scheduledTarget{
 				project:   proj,
 				projectID: projID,
 				checkout:  checkout,
 				target:    disc,
 				targetID:  tID,
-				priority:  o.targetPriority(tID),
+				priority:  priority,
 			})
 		}
 	}
@@ -345,6 +351,11 @@ func (o *Orchestrator) selectDueTargets(all []scheduledTarget) []scheduledTarget
 
 	var due []scheduledTarget
 	for _, item := range all {
+		if item.priority < 0 {
+			o.skipCounts[item.targetID] = 0
+			due = append(due, item)
+			continue
+		}
 		streak := o.flatStreaks[item.targetID]
 		// Back off targets with 3+ consecutive flat runs for up to 2 sweeps
 		maxSkip := min(streak/3, 2)

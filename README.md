@@ -380,7 +380,9 @@ The graph groups newly observed revisions by detection time, split into awaiting
 fuzzing and fuzzed (at least one clean-checkout run completed with `ok` or `crash`).
 The table shows previous/current SHAs, observation and last-sync times, run outcomes,
 and saved-input replay counts: passed / failed / blocked / pending. Use `[` / `]`
-to page, `p` to filter projects, and `w` to select a time window.
+to page, `p` to filter projects, and `w` to select a time window. Current revisions
+remain in the table even when detected before the selected window, so quiet
+repositories still show their latest sync health.
 
 Remote repositories are pulled with `git pull --ff-only` at the start of each
 fuzzing round. This observes branch heads, not every intermediate commit in a push.
@@ -389,6 +391,7 @@ and excluded from the new-revision graph. Revision observations and aggregate ru
 counts survive pruning of raw runs. Counts exclude dirty checkouts; historical
 revisions show the project's current sync health and current active-target count.
 
+Targets awaiting replay take priority and bypass normal fuzz backoff.
 Before fuzzing a target on a different SHA, ntfuzz replays each known crash's saved
 input in a disposable module copy, including previously closed crashes. A named
 reproducer subtest must execute and pass before the crash is marked resolved;

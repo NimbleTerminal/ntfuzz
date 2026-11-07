@@ -186,3 +186,28 @@ func TestRevisionMigrationFromV3(t *testing.T) {
 		t.Fatalf("migration not idempotent: %+v %v", stats, err)
 	}
 }
+
+func TestQuietCurrentRevisionsRemainVisible(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "quiet.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	if _, err = s.SyncProject(ctx, ProjectSyncInput{Name: "quiet", Repo: "local", GitSHA: "old", SyncedAt: &old}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.GetRevisionStats(ctx, "1h", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats.Revisions) != 1 || !stats.Revisions[0].Current {
+		t.Fatalf("quiet repo disappeared: %+v", stats)
+	}
+	for _, b := range stats.Buckets {
+		if b.DetectedRevisions != 0 {
+			t.Fatal("old baseline counted as a new revision")
+		}
+	}
+}

@@ -360,9 +360,10 @@ func TestRejectedTerminalConnections(t *testing.T) {
 	if resp2 == nil || resp2.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 Service Unavailable, got %+v", resp2)
 	}
-	if got := metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "connection_limit"}); got != 1 {
-		t.Fatalf("expected connection_limit rejected=1, got %v", got)
-	}
+	// The response can reach the client before the handler records rejection.
+	waitForCondition(t, 2*time.Second, func() bool {
+		return metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "connection_limit"}) == 1
+	})
 	if got := metricValue(t, m, "ntfuzz_terminal_sessions_opened_total", map[string]string{"mode": "view"}); got != 1 {
 		t.Fatalf("expected opened_total to remain 1, got %v", got)
 	}
@@ -380,12 +381,16 @@ func TestRejectedTerminalConnections(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected cross-origin websocket to be rejected")
 	}
+	if respOrigin == nil || respOrigin.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden, got %+v", respOrigin)
+	}
 	if respOrigin != nil && respOrigin.Body != nil {
 		_ = respOrigin.Body.Close()
 	}
-	if got := metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "origin"}); got != 1 {
-		t.Fatalf("expected origin rejected=1, got %v", got)
-	}
+	// The response can reach the client before the handler records rejection.
+	waitForCondition(t, 2*time.Second, func() bool {
+		return metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "origin"}) == 1
+	})
 
 	// 3. Plain HTTP GET /ws without WebSocket upgrade headers -> rejected with handshake.
 	respPlain, err := http.Get(server.URL + "/ws")
@@ -393,9 +398,10 @@ func TestRejectedTerminalConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = respPlain.Body.Close()
-	if got := metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "handshake"}); got != 1 {
-		t.Fatalf("expected handshake rejected=1 after plain GET /ws, got %v", got)
-	}
+	// The response can reach the client before the handler records rejection.
+	waitForCondition(t, 2*time.Second, func() bool {
+		return metricValue(t, m, "ntfuzz_terminal_sessions_rejected_total", map[string]string{"mode": "view", "reason": "handshake"}) == 1
+	})
 
 	// 4. WebSocket connection that sends an oversized initial resize -> rejected with handshake before opening a session.
 	connBad, _, err := websocket.Dial(ctx, wsURL, nil)

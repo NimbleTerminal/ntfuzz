@@ -62,3 +62,11 @@ func FuzzX(f *testing.F){ f.Fuzz(func(t *testing.T,s string){t.Skip("skip")}) }`
 		t.Fatal("missing input accepted")
 	}
 }
+
+func TestPendingReplayBypassesFuzzBackoff(t *testing.T) {
+	o := &Orchestrator{flatStreaks: map[int64]int{1: 10, 2: 0}, skipCounts: map[int64]int{}}
+	selected := o.selectDueTargets([]scheduledTarget{{targetID: 2, priority: 0}, {targetID: 1, priority: -1}})
+	if len(selected) != 2 || selected[0].targetID != 1 {
+		t.Fatalf("pending replay delayed: %+v", selected)
+	}
+}
