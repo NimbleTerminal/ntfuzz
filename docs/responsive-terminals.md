@@ -74,3 +74,25 @@ application demonstrate which constraints are actually reusable.
 - Kitty tests exercise narrow/short/wide transitions and revision suppression.
 - Existing WebSocket tests verify resizing an established terminal session.
 - Full Go race suite and vet remain the release gate.
+
+## Explicit touch keyboard (phone feedback)
+
+Physical-phone testing found that suppressing initial autofocus was insufficient:
+ntwebterm's canvas `touchend` listener explicitly focuses its hidden textarea even
+after swiping. The ntfuzz host now installs `touch_keyboard.mjs` after terminal
+initialization. Touch/pen input makes the textarea read-only with `inputmode=none`
+and clears the host's contenteditable surface before renderer focus runs. It does
+not cancel or stop touch events, so existing scroll/mouse handling still receives
+them. Keyboard restores editing and refocuses synchronously from the button
+gesture. Returning to the terminal surface dismisses typing mode; a genuine mouse
+pointer restores normal desktop behavior. Compatibility mouse events do not
+reenable editing. Disposal restores the original attributes.
+
+This is a host adapter to the current ntwebterm DOM. A future Booba/ntwebterm
+`touchFocus: explicit` option should own this policy directly, including renderer
+swaps, rather than requiring every host to inspect its textarea. The change only
+addresses keyboard activation; it does not change the TUI's scrolling semantics.
+
+Tests cover touch tap/swipe propagation, renderer-style focus, explicit keyboard,
+hybrid mouse/touch transitions, cleanup, and serving the embedded helper. Physical
+iPhone Safari confirmation is still needed for this follow-up.

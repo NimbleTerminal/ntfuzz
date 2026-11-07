@@ -53,14 +53,16 @@ func TestBoobaBridgeHandler(t *testing.T) {
 	}
 
 	// The host helper is embedded and served without a build-time JS dependency.
-	viewportResp, err := http.Get(ts.URL + "/viewport.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	viewportBody, _ := io.ReadAll(viewportResp.Body)
-	_ = viewportResp.Body.Close()
-	if viewportResp.StatusCode != http.StatusOK || !strings.Contains(viewportResp.Header.Get("Content-Type"), "javascript") || !strings.Contains(string(viewportBody), "installTerminalViewport") {
-		t.Fatalf("viewport helper unavailable: %s", viewportBody)
+	for path, symbol := range map[string]string{"/viewport.js": "installTerminalViewport", "/touch-keyboard.js": "installTerminalKeyboard"} {
+		response, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK || !strings.Contains(response.Header.Get("Content-Type"), "javascript") || !strings.Contains(string(body), symbol) {
+			t.Fatalf("host helper %s unavailable: %s", path, body)
+		}
 	}
 
 	// 2. Check /static/booba/booba.js is served from go-booba/serve's embedded assets

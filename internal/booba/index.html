@@ -210,6 +210,7 @@
     <script type="module">
         import { BoobaTerminal, installActionBar, resolveBoobaURLs } from './static/booba/booba.js';
         import { installTerminalViewport } from './viewport.js';
+        import { installTerminalKeyboard } from './touch-keyboard.js';
 
         const dot = document.getElementById('status-dot');
         const text = document.getElementById('status-text');
@@ -249,9 +250,10 @@
             });
 
             const viewport = installTerminalViewport({ root: document.body, fit: () => booba.fitAddon?.fit() });
+            const keyboard = installTerminalKeyboard({ root: document.getElementById('terminal-container'), focus: () => booba.focus() });
             const disposeActions = installActionBar(booba.actions, {
                 parent: document.getElementById('action-controls'),
-                openKeyboard: () => booba.focus(),
+                openKeyboard: keyboard.openKeyboard,
                 onLayout: viewport.fit,
             });
 
@@ -264,7 +266,7 @@
             window.addEventListener('pagehide', (event) => {
                 if (event.persisted) return;
                 dataLinks.removeEventListener('toggle', viewport.fit);
-                disposeActions(); viewport.dispose(); booba.dispose();
+                disposeActions(); keyboard.dispose(); viewport.dispose(); booba.dispose();
             });
         }
 

@@ -21,6 +21,9 @@ import (
 //go:embed index.html
 var embeddedIndexHTML []byte
 
+//go:embed touch_keyboard.mjs
+var embeddedTouchKeyboardJS []byte
+
 //go:embed viewport.mjs
 var embeddedViewportJS []byte
 
@@ -115,6 +118,10 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 
 	mux := http.NewServeMux()
 	registerDiscovery(mux)
+	mux.HandleFunc("GET /touch-keyboard.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = w.Write(embeddedTouchKeyboardJS)
+	})
 	mux.HandleFunc("GET /viewport.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		_, _ = w.Write(embeddedViewportJS)
