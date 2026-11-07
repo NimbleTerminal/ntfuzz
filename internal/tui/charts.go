@@ -130,7 +130,25 @@ func (m Model) renderStatsView() string {
 
 	stats := m.statsData
 	if activeQ.ID == api.StatsQueryRevisions {
-		b.WriteString(m.renderRevisionStats(contentWidth, max(8, m.height-reserved-8)))
+		// Measure the actual surrounding content instead of reserving estimated
+		// blank rows. Give the revision table every remaining terminal row.
+		chrome := []string{m.renderHeader(), m.renderOverviewCards()}
+		if m.lastErr != nil {
+			chrome = append(chrome, errorBannerStyle.Render(fmt.Sprintf("  ⚠ API warning: %v", m.lastErr)))
+		}
+		for _, p := range m.projects {
+			if p.SyncError != "" {
+				chrome = append(chrome, errorBannerStyle.Render(fmt.Sprintf("  ⚠ Project %s sync error: %s", p.Name, p.SyncError)))
+			}
+		}
+		if !m.hideHelp {
+			chrome = append(chrome, m.help.View(m.keyMap()))
+		}
+		used := panelStyle.GetVerticalFrameSize() + lipgloss.Height(strings.TrimSuffix(b.String(), "\n"))
+		for _, block := range chrome {
+			used += lipgloss.Height(block)
+		}
+		b.WriteString(m.renderRevisionStats(contentWidth, max(8, m.height-used)))
 		return panelStyle.Width(max(1, m.width-2)).Render(b.String())
 	}
 	if len(stats.Buckets) == 0 {
@@ -480,7 +498,8 @@ func (m Model) renderRevisionStats(width, height int) string {
 		return b.String()
 	}
 	// Two lines per record keep detection and sync times visible even on narrow screens.
-	pageSize := max(1, (height-chartHeight-5)/2)
+	// Only the legend, column header, and pagination footer sit outside the rows.
+	pageSize := max(1, (height-lipgloss.Height(chart.View())-3)/2)
 	pages := (len(stats.Revisions) + pageSize - 1) / pageSize
 	page := min(m.revisionPage, pages-1)
 	b.WriteString(ansi.Truncate(fmt.Sprintf("REPO / REVISION          RUNS ok/crash/error    REPLAY pass/fail/blocked/pending"), width, "…") + "\n")
