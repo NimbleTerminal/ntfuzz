@@ -21,6 +21,11 @@
             background: #10151d;
         }
         body {
+            position: fixed;
+            inset-inline: 0;
+            top: var(--terminal-viewport-top, 0px);
+            height: var(--terminal-viewport-height, 100dvh);
+            padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
             display: flex;
             flex-direction: column;
         }
@@ -147,10 +152,34 @@
         }
         .api-links a { color: #7dd3fc; }
         .booba-action {
-            min-height: 34px;
+            min-height: 44px;
+            min-width: 44px;
+            padding: 6px 10px;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            background: #1e293b;
+            color: #e2e8f0;
         }
         .booba-action--keyboard {
             margin-inline-start: auto;
+        }
+        .booba-action:disabled { opacity: .45; }
+        .booba-action:focus-visible { outline: 2px solid #38bdf8; outline-offset: -2px; }
+        .api-links summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; }
+        .api-links nav { padding-bottom: 6px; }
+        .topbar, #action-controls, .api-links { flex-shrink: 0; }
+        @media (max-width: 700px), (max-height: 500px) {
+            .topbar { padding: 5px 10px; min-height: 36px; }
+            .brand-sub, #status-text { display: none; }
+            #terminal-container { padding: 3px; }
+            #action-controls { padding: 5px 6px; }
+            /* One scrollable row, not several rows taken away from the terminal. */
+            #action-controls .booba-action-bar { flex-wrap: nowrap; overflow-x: auto; gap: 6px; scrollbar-width: thin; }
+            #action-controls .booba-action-group { display: contents; }
+            #action-controls .booba-action { flex: 0 0 auto; white-space: nowrap; }
+            #action-controls .booba-action--keyboard { margin-inline-start: 0; }
+            .api-links { padding: 0 10px; max-height: 30dvh; overflow-y: auto; }
+            .api-links summary { min-height: 44px; }
         }
     </style>
 </head>
@@ -167,17 +196,20 @@
     </header>
     <div id="terminal-container" aria-label="ntfuzz live terminal"></div>
     <div id="action-controls"></div>
-    <nav class="api-links" aria-label="Dashboard data">
-        Read dashboard data as JSON:
+    <details class="api-links">
+        <summary>Data &amp; API</summary>
+        <nav aria-label="Dashboard data">
         <a href="/api/crashes?open=true">Open crashes</a> ·
         <a href="/api/projects">Projects</a> ·
         <a href="/api/status">Status</a> ·
         <a href="/api/docs">API documentation</a> ·
         <a href="/llms.txt">Agent guide</a>
-    </nav>
+        </nav>
+    </details>
 
     <script type="module">
         import { BoobaTerminal, installActionBar, resolveBoobaURLs } from './static/booba/booba.js';
+        import { installTerminalViewport } from './viewport.js';
 
         const dot = document.getElementById('status-dot');
         const text = document.getElementById('status-text');
@@ -216,17 +248,24 @@
                 encode: gesture => booba.encodeKey(gesture),
             });
 
-            installActionBar(booba.actions, {
+            const viewport = installTerminalViewport({ root: document.body, fit: () => booba.fitAddon?.fit() });
+            const disposeActions = installActionBar(booba.actions, {
                 parent: document.getElementById('action-controls'),
                 openKeyboard: () => booba.focus(),
-                onLayout: () => booba.fitAddon?.fit(),
+                onLayout: viewport.fit,
             });
 
             const urls = resolveBoobaURLs(document.baseURI);
             booba.connectWebSocket(urls.wsUrl);
-            booba.focus();
+            if (matchMedia("(pointer: fine)").matches) booba.focus();
 
-            window.addEventListener('pagehide', () => booba.dispose(), { once: true });
+            const dataLinks = document.querySelector('.api-links');
+            dataLinks.addEventListener('toggle', viewport.fit);
+            window.addEventListener('pagehide', (event) => {
+                if (event.persisted) return;
+                dataLinks.removeEventListener('toggle', viewport.fit);
+                disposeActions(); viewport.dispose(); booba.dispose();
+            });
         }
 
         main().catch(err => {

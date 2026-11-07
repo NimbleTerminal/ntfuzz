@@ -121,3 +121,34 @@ func TestKittyCapabilityIsPerTerminal(t *testing.T) {
 		t.Fatal("another terminal's capability enabled this session")
 	}
 }
+
+func TestCompactKittyResizeAndSuppression(t *testing.T) {
+	picture.ForceKittyCapability(picture.KittyCapabilitySupported)
+	defer picture.ForceKittyCapability(picture.KittyCapabilityUnknown)
+	m := NewModel(nil, time.Second)
+	m.mode = ViewStats
+	m.statsQueryIdx = 4
+	_ = m.toggleGraphics()
+	m.graphicsSupported = true
+	m.statsData = api.StatsResponse{Query: api.StatsQueryBurndown, Window: "24h", Buckets: []api.StatsBucket{{BucketStart: time.Now(), OpenCrashes: 5}, {BucketStart: time.Now().Add(time.Hour), OpenCrashes: 2}}}
+	for _, size := range [][2]int{{40, 30}, {40, 12}, {120, 45}, {32, 20}} {
+		next, cmd := m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		m = next.(Model)
+		m, _ = drainGraphics(t, m, cmd)
+		if m.compactStats() {
+			w, h := m.graphSize()
+			if w != size[0] || h != m.compactChartHeight() {
+				t.Fatal("renderer budget mismatch")
+			}
+			if h == 0 && m.graphics.Mode() == picture.PictureKitty {
+				t.Fatal("hidden chart still in Kitty mode")
+			}
+		}
+	}
+	m.statsQueryIdx = 3
+	m.statsData.Query = api.StatsQueryRevisions
+	m, _ = drainGraphics(t, m, m.syncGraphics())
+	if m.graphics.Mode() == picture.PictureKitty {
+		t.Fatal("revision cards should release graphics on a narrow screen")
+	}
+}

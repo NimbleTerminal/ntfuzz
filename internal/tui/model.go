@@ -541,7 +541,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.revisionPage = max(0, m.revisionPage-1)
 				return m, nil
 			case "]":
-				m.revisionPage = min(len(m.statsData.Revisions)-1, m.revisionPage+1)
+				m.revisionPage = m.revisionPage + 1
+				if m.compactStats() {
+					m.revisionPage = min(m.revisionPage, len(m.compactRevisionPages())-1)
+				} else {
+					m.revisionPage = min(m.revisionPage, max(0, len(m.statsData.Revisions)-1))
+				}
 				m.revisionPage = max(0, m.revisionPage)
 				return m, nil
 			}
@@ -883,6 +888,12 @@ func (m *Model) syncDetailWidgets() {
 
 // View implements tea.Model.
 func (m Model) View() tea.View {
+	if m.mode == ViewFleet && (m.width < 80 || m.height < 24) {
+		return m.compactFleetView()
+	}
+	if m.compactStats() {
+		return m.compactStatsView()
+	}
 	var b strings.Builder
 
 	b.WriteString(m.renderHeader())
@@ -1456,6 +1467,9 @@ func crashSummaryLine(stack string) string {
 
 func (m Model) keyMap() KeyMap {
 	km := NewKeyMap(m.mode, m.hideHelp)
+	revisions := m.mode == ViewStats && m.currentStatsQuery().ID == api.StatsQueryRevisions
+	km.PagePrev.SetEnabled(revisions)
+	km.PageNext.SetEnabled(revisions)
 	if m.readOnly {
 		km.FixCrash.SetEnabled(false)
 	}

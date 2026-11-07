@@ -21,6 +21,9 @@ import (
 //go:embed index.html
 var embeddedIndexHTML []byte
 
+//go:embed viewport.mjs
+var embeddedViewportJS []byte
+
 // BridgeOptions configures the combined HTTP API + Booba TUI server.
 type BridgeOptions struct {
 	ListenAddr        string
@@ -112,6 +115,10 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 
 	mux := http.NewServeMux()
 	registerDiscovery(mux)
+	mux.HandleFunc("GET /viewport.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = w.Write(embeddedViewportJS)
+	})
 	if apiServer != nil {
 		mux.Handle("/api/", apiServer)
 	}

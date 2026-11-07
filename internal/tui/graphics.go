@@ -102,6 +102,9 @@ func (m Model) graphicsLabel() string {
 }
 
 func (m Model) graphSize() (int, int) {
+	if m.compactStats() {
+		return max(1, m.width), m.compactChartHeight()
+	}
 	width := max(12, m.width-6)
 	reserved := lipgloss.Height(m.renderHeader()) + lipgloss.Height(m.renderOverviewCards()) + 2
 	if !m.hideHelp {
@@ -138,7 +141,7 @@ func (m *Model) syncGraphics() tea.Cmd {
 	if !m.graphicsInitialized {
 		return nil
 	}
-	if !m.graphicsRequested || m.mode != ViewStats {
+	if !m.graphicsRequested || m.mode != ViewStats || (m.compactStats() && m.compactChartHeight() == 0) {
 		m.graphicsKey = ""
 		if m.graphics.Mode() == picture.PictureKitty {
 			return m.graphics.Toggle()
@@ -157,6 +160,16 @@ func (m *Model) syncGraphics() tea.Cmd {
 	}
 	width, height := m.graphSize()
 	spec := imageChartData(m.statsData)
+	if m.compactStats() {
+		index := 0
+		if m.currentStatsQuery().ID == api.StatsQueryOutcomes {
+			index = 1
+		}
+		spec.Values = spec.Values[index : index+1]
+		spec.Names = []string{compactSeriesName(m.currentStatsQuery().ID)}
+		spec.Dual = false
+		spec.Bar = false
+	}
 	raw, _ := json.Marshal(spec)
 	cacheKey := fmt.Sprintf("%dx%d:%s", width, height, raw)
 	if cacheKey == m.graphicsKey {

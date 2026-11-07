@@ -29,6 +29,8 @@ func (v ViewMode) ContextName() string {
 
 // KeyMap implements help.KeyMap and is surfaced both in-terminal and as Booba Terminal Actions.
 type KeyMap struct {
+	PagePrev   key.Binding
+	PageNext   key.Binding
 	Up         key.Binding
 	Down       key.Binding
 	Enter      key.Binding
@@ -70,6 +72,8 @@ func NewKeyMap(mode ViewMode, hideHelp bool) KeyMap {
 	}
 
 	return KeyMap{
+		PagePrev:   key.NewBinding(key.WithKeys("["), key.WithHelp("[", "Prev page")),
+		PageNext:   key.NewBinding(key.WithKeys("]"), key.WithHelp("]", "Next page")),
 		Up:         key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", upLabel)),
 		Down:       key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", downLabel)),
 		Enter:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "Target detail")),
@@ -98,7 +102,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 	case ViewCrashes:
 		return []key.Binding{k.Enter, k.Back, k.Up, k.Down, k.FixCrash, k.Graphs, k.Crashes, k.Refresh}
 	case ViewStats:
-		return []key.Binding{k.Back, k.Up, k.Down, k.Window, k.Graphics, k.Project, k.Graphs, k.Crashes, k.Refresh}
+		return []key.Binding{k.Back, k.Up, k.Down, k.Window, k.Graphics, k.Project, k.PagePrev, k.PageNext, k.Graphs, k.Crashes, k.Refresh}
 	default:
 		return []key.Binding{k.Enter, k.Up, k.Down, k.Sort, k.Project, k.Graphs, k.Crashes, k.Refresh}
 	}
@@ -119,7 +123,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		}
 	case ViewStats:
 		return [][]key.Binding{
-			{k.Back, k.Up, k.Down, k.Window, k.Graphics, k.Project},
+			{k.Back, k.Up, k.Down, k.Window, k.Graphics, k.Project, k.PagePrev, k.PageNext},
 			{k.Graphs, k.Crashes, k.Refresh, k.More, k.Visibility, k.Quit},
 		}
 	default:
