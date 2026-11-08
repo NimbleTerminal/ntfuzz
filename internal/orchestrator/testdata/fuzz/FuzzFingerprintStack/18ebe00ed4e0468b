@@ -1,0 +1,2 @@
+go test fuzz v1
+string("0.go:0+0xFAIL\texample.com/pkg\t0.42s")

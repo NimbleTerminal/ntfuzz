@@ -88,7 +88,7 @@ var (
 	reHexAddr         = regexp.MustCompile(`0x[0-9a-fA-F]+`)
 	reGoroutine       = regexp.MustCompile(`goroutine \d+`)
 	reFailDuration    = regexp.MustCompile(`\([0-9.]+s\)`)
-	rePkgFailDuration = regexp.MustCompile(`(?m)^(FAIL\t\S+\t)[0-9.]+s`)
+	rePkgFailDuration = regexp.MustCompile(`(FAIL\t\S+\t)[0-9.]+s`)
 )
 
 // RunTarget executes `go test -fuzz` with GOMAXPROCS=1 and -parallel=1, copies any crash inputs into
@@ -383,17 +383,21 @@ func FingerprintStack(stack string) string {
 	if trimmed == "" {
 		return ""
 	}
-	normalized := reFileLine.ReplaceAllStringFunc(trimmed, func(m string) string {
+	// Normalize duration and goroutine tokens before rewriting file:line and hex
+	// fragments. Those later passes can consume characters adjacent to a token
+	// (for example "+0xFA" swallowing the "FA" of an interleaved "FAIL\t" line),
+	// which would otherwise leave the duration intact and split fingerprints.
+	normalized := reFailDuration.ReplaceAllString(trimmed, "(0s)")
+	normalized = rePkgFailDuration.ReplaceAllString(normalized, "${1}0s")
+	normalized = reGoroutine.ReplaceAllString(normalized, "goroutine N")
+	normalized = reFileLine.ReplaceAllStringFunc(normalized, func(m string) string {
 		colon := strings.IndexByte(m, ':')
 		if colon < 0 {
 			return m
 		}
 		return filepath.Base(m[:colon])
 	})
-	normalized = reFailDuration.ReplaceAllString(normalized, "(0s)")
-	normalized = rePkgFailDuration.ReplaceAllString(normalized, "${1}0s")
 	normalized = reHexAddr.ReplaceAllString(normalized, "0xADDR")
-	normalized = reGoroutine.ReplaceAllString(normalized, "goroutine N")
 	sum := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(sum[:12])
 }

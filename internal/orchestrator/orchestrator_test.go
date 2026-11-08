@@ -471,3 +471,21 @@ func TestDiscoverSelfTargetsSkipsExamples(t *testing.T) {
 		t.Fatalf("expected 2 targets in examples/demo-parser when targeted directly, got %+v", exampleTargets)
 	}
 }
+
+func TestFingerprintStackNormalizesEmbeddedDurations(t *testing.T) {
+	// Regression cases found by FuzzFingerprintStack on the fleet. A fuzz target that
+	// writes partial stdout without a newline leaves go test's package FAIL line with a
+	// prefix, so the duration token is not at line start. When that prefix ends in a
+	// path/hex fragment, the file-line pass must not consume part of the FAIL token
+	// before the duration pass sees it.
+	cases := []struct{ name, a, b string }{
+		{"interleaved prefix", "0FAIL\texample.com/pkg\t0.42s", "0FAIL\texample.com/pkg\t9.99s"},
+		{"hex-adjacent prefix", "0.go:0+0xFAIL\texample.com/pkg\t0.42s", "0.go:0+0xFAIL\texample.com/pkg\t9.99s"},
+		{"line-start package fail", "FAIL\texample.com/pkg\t0.42s", "FAIL\texample.com/pkg\t9.99s"},
+	}
+	for _, tc := range cases {
+		if fa, fb := FingerprintStack(tc.a), FingerprintStack(tc.b); fa != fb {
+			t.Errorf("%s: fingerprint changed with duration: %q vs %q", tc.name, fa, fb)
+		}
+	}
+}
