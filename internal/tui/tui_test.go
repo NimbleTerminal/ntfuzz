@@ -764,4 +764,19 @@ func TestCrashesAndBurndownDistinguishReportedAndDependencyBlame(t *testing.T) {
 	if !strings.Contains(statsView, "1 unreported, 1 reported") {
 		t.Fatalf("expected burndown summary to distinguish open-unreported and open-reported:\n%s", statsView)
 	}
+
+	// Verify TUI redacts credentials in project SyncError banner as defense in depth
+	m.mode = ViewFleet
+	m.projects = []api.Project{
+		{
+			ID:        9,
+			Name:      "private-proj",
+			Repo:      "https://github.com/org/private-proj.git",
+			SyncError: "fatal: Authentication failed for 'https://user:ghp_abc@github.com/org/private-proj.git/' Authorization: token ghp_xyz",
+		},
+	}
+	fleetView := m.View().Content
+	if strings.Contains(fleetView, "ghp_abc") || strings.Contains(fleetView, "ghp_xyz") {
+		t.Fatalf("expected TUI project sync error banner to redact credentials, got:\n%s", fleetView)
+	}
 }

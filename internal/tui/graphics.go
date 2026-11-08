@@ -129,7 +129,7 @@ func (m Model) graphSize() (int, int) {
 		}
 		for _, p := range m.projects {
 			if p.SyncError != "" {
-				used += lipgloss.Height(errorBannerStyle.Render(fmt.Sprintf("  ⚠ Project %s sync error: %s", p.Name, p.SyncError)))
+				used += lipgloss.Height(errorBannerStyle.Render(fmt.Sprintf("  ⚠ Project %s sync error: %s", p.Name, api.RedactSyncError(p.SyncError))))
 			}
 		}
 		return width, max(4, min(8, max(8, m.height-used)/3))

@@ -902,7 +902,7 @@ func (m Model) View() tea.View {
 
 	for _, p := range m.projects {
 		if p.SyncError != "" {
-			b.WriteString(errorBannerStyle.Render(fmt.Sprintf("  ⚠ Project %s sync error: %s", p.Name, p.SyncError)))
+			b.WriteString(errorBannerStyle.Render(fmt.Sprintf("  ⚠ Project %s sync error: %s", p.Name, api.RedactSyncError(p.SyncError))))
 			b.WriteString("\n")
 		}
 	}

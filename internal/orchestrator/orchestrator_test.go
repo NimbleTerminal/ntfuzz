@@ -66,6 +66,42 @@ projects:
 `,
 			wantErr: "missing repo",
 		},
+		{
+			name: "repo with https user and token rejected",
+			yaml: `
+projects:
+  - name: secret-proj
+    repo: https://user:ghp_secret123@github.com/org/repo.git
+`,
+			wantErr: "project \"secret-proj\" repo URL must not contain embedded credentials; see docs/deployment-cookbook.md 'Private repositories'",
+		},
+		{
+			name: "repo with https token-only userinfo rejected",
+			yaml: `
+projects:
+  - name: secret-proj
+    repo: https://ghp_secret123@github.com/org/repo.git
+`,
+			wantErr: "project \"secret-proj\" repo URL must not contain embedded credentials; see docs/deployment-cookbook.md 'Private repositories'",
+		},
+		{
+			name: "repo with ssh git@host:org/repo accepted",
+			yaml: `
+projects:
+  - name: ssh-proj
+    repo: git@github.com:org/repo
+`,
+			wantErr: "",
+		},
+		{
+			name: "repo with plain https accepted",
+			yaml: `
+projects:
+  - name: https-proj
+    repo: https://github.com/org/repo.git
+`,
+			wantErr: "",
+		},
 	}
 
 	for _, tc := range cases {
@@ -488,4 +524,89 @@ func TestFingerprintStackNormalizesEmbeddedDurations(t *testing.T) {
 			t.Errorf("%s: fingerprint changed with duration: %q vs %q", tc.name, fa, fb)
 		}
 	}
+}
+
+func TestPrivateRepoSyncRedactionEnvAndAuthHint(t *testing.T) {
+	// 1. Redaction of sync error containing https://user:ghp_abc@github.com/... and Authorization: token ...
+	rawErr := "git clone https://user:ghp_abc@github.com/org/repo.git: fatal: Authentication failed; header Authorization: token ghp_xyz987"
+	redacted := SanitizeDiagnostic(rawErr)
+	if strings.Contains(redacted, "ghp_abc") || strings.Contains(redacted, "user:ghp_abc") || strings.Contains(redacted, "ghp_xyz987") {
+		t.Fatalf("expected credentials to be redacted from sync error, got %q", redacted)
+	}
+	if !strings.Contains(redacted, "https://<redacted>@github.com/org/repo.git") || !strings.Contains(redacted, "Authorization: token <redacted>") {
+		t.Fatalf("unexpected redacted format: %q", redacted)
+	}
+
+	// Defense-in-depth Repo URL redaction
+	if got := RedactRepoURL("https://user:ghp_abc@github.com/org/repo.git"); got != "https://<redacted>@github.com/org/repo.git" {
+		t.Fatalf("expected redacted repo URL, got %q", got)
+	}
+	if got := RedactRepoURL("git@github.com:org/repo.git"); got != "git@github.com:org/repo.git" {
+		t.Fatalf("expected ssh repo URL untouched, got %q", got)
+	}
+
+	// 2. Environment variables in runGit / buildGitEnv
+	t.Run("env defaults and overrides", func(t *testing.T) {
+		t.Setenv("GIT_SSH_COMMAND", "")
+		t.Setenv("NTFUZZ_GIT_SSH_COMMAND", "")
+		envDefault := gitEnv()
+		var gotPrompt, gotSSH string
+		for _, kv := range envDefault {
+			if strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT=") {
+				gotPrompt = strings.TrimPrefix(kv, "GIT_TERMINAL_PROMPT=")
+			}
+			if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") {
+				gotSSH = strings.TrimPrefix(kv, "GIT_SSH_COMMAND=")
+			}
+		}
+		if gotPrompt != "0" {
+			t.Fatalf("expected GIT_TERMINAL_PROMPT=0, got %q", gotPrompt)
+		}
+		if gotSSH != "ssh -o BatchMode=yes" {
+			t.Fatalf("expected default GIT_SSH_COMMAND='ssh -o BatchMode=yes', got %q", gotSSH)
+		}
+
+		// Respect existing GIT_SSH_COMMAND when NTFUZZ_GIT_SSH_COMMAND is unset
+		t.Setenv("GIT_SSH_COMMAND", "ssh -i /custom/id_ed25519 -o BatchMode=yes")
+		for _, kv := range gitEnv() {
+			if strings.HasPrefix(kv, "GIT_SSH_COMMAND=") {
+				gotSSH = strings.TrimPrefix(kv, "GIT_SSH_COMMAND=")
+			}
+		}
+		if gotSSH != "ssh -i /custom/id_ed25519 -o BatchMode=yes" {
+			t.Fatalf("expected existing GIT_SSH_COMMAND preserved, got %q", gotSSH)
+		}
+
+		// NTFUZZ_GIT_SSH_COMMAND overrides GIT_SSH_COMMAND; verify through actual runGit execution
+		t.Setenv("NTFUZZ_GIT_SSH_COMMAND", "ssh -F /etc/ntfuzz/ssh_config -o BatchMode=yes")
+		ctx := context.Background()
+		err := runGit(ctx, t.TempDir(), "-c", "alias.printenv=!sh -c 'printf \"PROMPT=%s SSH=%s\" \"$GIT_TERMINAL_PROMPT\" \"$GIT_SSH_COMMAND\"; exit 1'", "printenv")
+		if err == nil {
+			t.Fatalf("expected failing git alias to return error with env output")
+		}
+		if !strings.Contains(err.Error(), "PROMPT=0 SSH=ssh -F /etc/ntfuzz/ssh_config -o BatchMode=yes") {
+			t.Fatalf("expected runGit subprocess to receive overridden env, got: %v", err)
+		}
+	})
+
+	// 3. Failure message hint on the four auth stderr patterns vs non-auth failure
+	t.Run("auth failure hint", func(t *testing.T) {
+		authPatterns := []string{
+			"fatal: Authentication failed for 'https://github.com/org/private.git/'",
+			"git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+			"fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+			"remote: Repository not found.\nfatal: repository 'https://github.com/org/private.git/' not found",
+		}
+		for _, stderr := range authPatterns {
+			err := formatGitCommandError("", []string{"clone", "--depth", "1", "https://github.com/org/private.git", "/tmp/dest"}, errors.New("exit status 128"), []byte(stderr))
+			if !strings.Contains(err.Error(), privateRepoAuthHint) {
+				t.Fatalf("expected auth hint for stderr %q, got: %v", stderr, err)
+			}
+		}
+
+		nonAuthErr := formatGitCommandError("", []string{"clone", "--depth", "1", "https://github.com/org/public.git", "/tmp/dest"}, errors.New("exit status 128"), []byte("fatal: unable to access 'https://github.com/org/public.git/': Could not resolve host: github.com"))
+		if strings.Contains(nonAuthErr.Error(), privateRepoAuthHint) {
+			t.Fatalf("did not expect auth hint on non-auth failure, got: %v", nonAuthErr)
+		}
+	})
 }

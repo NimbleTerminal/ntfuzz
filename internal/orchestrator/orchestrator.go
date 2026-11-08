@@ -128,20 +128,21 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 		}
 		checkout, err := EnsureCheckout(ctx, proj, o.cfg.WorkDir)
 		if err != nil {
+			syncErr := sanitizeDiagnostic(err.Error(), checkout.RepoDir, o.cfg.WorkDir, o.cfg.CorpusDir)
 			o.logger.Warn("checkout/pull failed",
 				"component", "orchestrator",
 				"project", proj.Name,
-				"err", err,
+				"err", syncErr,
 			)
 			// Record the sync error visibly WITHOUT advancing last_synced
 			_, _ = o.store.SyncProject(ctx, store.ProjectSyncInput{
 				Name:         proj.Name,
-				Repo:         proj.Repo,
+				Repo:         RedactRepoURL(proj.Repo),
 				Branch:       proj.Branch,
 				GitSHA:       checkout.GitSHA,
 				Dirty:        checkout.Dirty,
 				SyncedAt:     nil,
-				SyncError:    err.Error(),
+				SyncError:    syncErr,
 				PublicInputs: proj.PublicInputs,
 			})
 			continue
@@ -150,7 +151,7 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 		now := time.Now().UTC()
 		projID, err := o.store.SyncProject(ctx, store.ProjectSyncInput{
 			Name:         proj.Name,
-			Repo:         proj.Repo,
+			Repo:         RedactRepoURL(proj.Repo),
 			Branch:       proj.Branch,
 			GitSHA:       checkout.GitSHA,
 			Dirty:        checkout.Dirty,

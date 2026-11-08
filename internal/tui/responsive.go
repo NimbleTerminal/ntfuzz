@@ -163,7 +163,7 @@ func (m Model) compactRevisionPages() []string {
 		record := fmt.Sprintf("%s @ %s (%s)\nDetected %s UTC\nSync %s UTC\nRuns: %d OK / %d crash / %d error\nReplay: %d pass / %d fail\nReplay: %d blocked / %d pending", r.Project, sha, kind, r.DetectedAt.UTC().Format("01-02 15:04"), sync, r.OKRuns, r.CrashRuns, r.ErrorRuns, r.ReplayPassed, r.ReplayFailed, r.ReplayBlocked, r.ReplayPending)
 		record += fmt.Sprintf("\n%d targets tested", r.TestedTargets)
 		if r.SyncError != "" {
-			record += "\nSync error: " + r.SyncError
+			record += "\nSync error: " + api.RedactSyncError(r.SyncError)
 		}
 		records = append(records, record)
 	}

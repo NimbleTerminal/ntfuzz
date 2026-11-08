@@ -140,7 +140,7 @@ func (m Model) renderStatsView() string {
 		}
 		for _, p := range m.projects {
 			if p.SyncError != "" {
-				chrome = append(chrome, errorBannerStyle.Render(fmt.Sprintf("  ⚠ Project %s sync error: %s", p.Name, p.SyncError)))
+				chrome = append(chrome, errorBannerStyle.Render(fmt.Sprintf("  ⚠ Project %s sync error: %s", p.Name, api.RedactSyncError(p.SyncError))))
 			}
 		}
 		if !m.hideHelp {
@@ -555,7 +555,7 @@ func (m Model) renderRevisionStats(width, height int) string {
 			state = "fuzz blocked"
 		}
 		if v.SyncError != "" {
-			state = "SYNC ERROR: " + v.SyncError
+			state = "SYNC ERROR: " + api.RedactSyncError(v.SyncError)
 		}
 		detail := fmt.Sprintf("  %s UTC • %s • sync %s • %s • %d targets tested", v.DetectedAt.UTC().Format("01-02 15:04"), kind, sync, state, v.TestedTargets)
 		b.WriteString(subtleTextStyle.Render(ansi.Truncate(detail, width, "…")) + "\n")

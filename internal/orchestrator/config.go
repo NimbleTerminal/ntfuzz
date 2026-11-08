@@ -11,6 +11,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"nimbleterminal.dev/ntfuzz/configs"
+	"nimbleterminal.dev/ntfuzz/internal/store"
 )
 
 // Config defines the YAML configuration for the ntfuzz orchestrator.
@@ -116,6 +117,9 @@ func ParseConfig(data []byte) (Config, error) {
 		}
 		if p.Repo == "" {
 			return Config{}, fmt.Errorf("project %q is missing repo", p.Name)
+		}
+		if store.HasEmbeddedRepoCredentials(p.Repo) {
+			return Config{}, fmt.Errorf("project %q repo URL must not contain embedded credentials; see docs/deployment-cookbook.md 'Private repositories'", p.Name)
 		}
 		if p.FuzzTime != "" {
 			if d, err := time.ParseDuration(p.FuzzTime); err != nil || d <= 0 {

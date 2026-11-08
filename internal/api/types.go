@@ -27,17 +27,27 @@ type Project struct {
 	AvgCoveragePct float64    `json:"avg_coverage_pct"`
 }
 
+// RedactSyncError redacts URL credentials and labeled secrets from a sync error string.
+func RedactSyncError(s string) string {
+	return orchestrator.SanitizeDiagnostic(s)
+}
+
+// RedactRepoURL strips embedded credentials from a repository URL as defense in depth.
+func RedactRepoURL(repo string) string {
+	return orchestrator.RedactRepoURL(repo)
+}
+
 // ProjectFromStore converts a store.Project into an API Project DTO.
 func ProjectFromStore(p store.Project) Project {
 	return Project{
 		ID:             p.ID,
 		Name:           p.Name,
-		Repo:           p.Repo,
+		Repo:           orchestrator.RedactRepoURL(p.Repo),
 		Branch:         p.Branch,
 		GitSHA:         p.GitSHA,
 		Dirty:          p.Dirty,
 		PublicInputs:   p.PublicInputs,
-		SyncError:      p.SyncError,
+		SyncError:      orchestrator.SanitizeDiagnostic(p.SyncError),
 		LastSynced:     p.LastSynced,
 		TargetCount:    p.TargetCount,
 		TotalRuns:      p.TotalRuns,
@@ -396,7 +406,15 @@ func StatsResponseFromStore(s store.StatsSeries) StatsResponse {
 	for _, b := range s.Buckets {
 		buckets = append(buckets, StatsBucketFromStore(b))
 	}
-	return StatsResponse{HistoryEstimatedBefore: s.HistoryEstimatedBefore, OpenCrashes: s.OpenCrashes, NewCrashes: s.NewCrashes, ReopenedCrashes: s.ReopenedCrashes, ResolvedCrashes: s.ResolvedCrashes, Revisions: s.Revisions,
+	var revisions []Revision
+	if len(s.Revisions) > 0 {
+		revisions = make([]Revision, len(s.Revisions))
+		for i, r := range s.Revisions {
+			r.SyncError = orchestrator.SanitizeDiagnostic(r.SyncError)
+			revisions[i] = r
+		}
+	}
+	return StatsResponse{HistoryEstimatedBefore: s.HistoryEstimatedBefore, OpenCrashes: s.OpenCrashes, NewCrashes: s.NewCrashes, ReopenedCrashes: s.ReopenedCrashes, ResolvedCrashes: s.ResolvedCrashes, Revisions: revisions,
 		Query:          s.Query,
 		Window:         s.Window,
 		BucketSeconds:  s.BucketSeconds,

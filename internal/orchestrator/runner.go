@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"nimbleterminal.dev/ntfuzz/internal/store"
 )
 
 // JobSpec describes a single fuzzing job to be executed by a worker.
@@ -676,8 +678,18 @@ var userHomeDir = func() string {
 	return home
 }()
 
-var diagnosticSecret = regexp.MustCompile(`(?i)(token|password|secret|authorization|api[_-]?key)([=: ]+)[^\s]+`)
-var diagnosticURL = regexp.MustCompile(`(https?://)[^/\s@]+@`)
+var diagnosticSecret = regexp.MustCompile(`(?i)(token|password|secret|authorization|api[_-]?key)([=: ]+(?:(?:token|bearer|basic)\s+)?)[^\s'"]+`)
+var diagnosticURL = regexp.MustCompile(`(https?://|git://|ssh://[^/\s@'"]*:)[^/\s@'"]+@`)
+
+// SanitizeDiagnostic redacts local paths, user home directory, URL credentials, and labeled secrets.
+func SanitizeDiagnostic(s string, paths ...string) string {
+	return sanitizeDiagnostic(s, paths...)
+}
+
+// RedactRepoURL strips embedded credentials from a repository URL as defense in depth.
+func RedactRepoURL(repo string) string {
+	return store.RedactRepoURL(repo)
+}
 
 func sanitizeDiagnostic(s string, paths ...string) string {
 	for _, path := range paths {

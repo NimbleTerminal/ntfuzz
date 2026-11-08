@@ -95,7 +95,7 @@ func EnsureCheckout(ctx context.Context, proj ProjectConfig, workDir string) (Ch
 	}
 	args = append(args, repo, dest)
 	if err := runGit(ctx, "", args...); err != nil {
-		return CheckoutInfo{GoVersion: goVer}, fmt.Errorf("git clone %s: %w", repo, err)
+		return CheckoutInfo{GoVersion: goVer}, fmt.Errorf("git clone %s: %w", RedactRepoURL(repo), err)
 	}
 
 	sha, dirty := inspectGitRevision(ctx, dest)
@@ -108,9 +108,10 @@ func EnsureCheckout(ctx context.Context, proj ProjectConfig, workDir string) (Ch
 }
 
 func inspectGitRevision(ctx context.Context, dir string) (string, bool) {
+	env := gitEnv()
 	shaCmd := exec.CommandContext(ctx, "git", "rev-parse", "--short=12", "HEAD")
 	shaCmd.Dir = dir
-	shaCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	shaCmd.Env = env
 	shaOut, err := shaCmd.Output()
 	if err != nil {
 		return "", false
@@ -119,7 +120,7 @@ func inspectGitRevision(ctx context.Context, dir string) (string, bool) {
 
 	statusCmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "--", ".")
 	statusCmd.Dir = dir
-	statusCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	statusCmd.Env = env
 	statusOut, err := statusCmd.Output()
 	dirty := err == nil && len(strings.TrimSpace(string(statusOut))) > 0
 	return sha, dirty
@@ -135,15 +136,83 @@ func detectGoVersion(ctx context.Context) string {
 	return runtime.Version()
 }
 
+const (
+	defaultGitSSHCommand = "ssh -o BatchMode=yes"
+	privateRepoAuthHint  = "repository may be private; see docs/deployment-cookbook.md 'Private repositories'"
+)
+
+var gitAuthFailurePatterns = []string{
+	"Authentication failed",
+	"Permission denied (publickey)",
+	"could not read Username",
+	"Repository not found",
+}
+
+func gitEnv() []string {
+	return buildGitEnv(os.Environ())
+}
+
+func buildGitEnv(base []string) []string {
+	out := make([]string, 0, len(base)+2)
+	var gitSSH string
+	var ntfuzzSSH string
+	for _, kv := range base {
+		switch {
+		case strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT="):
+			continue
+		case strings.HasPrefix(kv, "NTFUZZ_GIT_SSH_COMMAND="):
+			ntfuzzSSH = strings.TrimSpace(strings.TrimPrefix(kv, "NTFUZZ_GIT_SSH_COMMAND="))
+			out = append(out, kv)
+		case strings.HasPrefix(kv, "GIT_SSH_COMMAND="):
+			gitSSH = strings.TrimSpace(strings.TrimPrefix(kv, "GIT_SSH_COMMAND="))
+		default:
+			out = append(out, kv)
+		}
+	}
+	out = append(out, "GIT_TERMINAL_PROMPT=0")
+	switch {
+	case ntfuzzSSH != "":
+		out = append(out, "GIT_SSH_COMMAND="+ntfuzzSSH)
+	case gitSSH != "":
+		out = append(out, "GIT_SSH_COMMAND="+gitSSH)
+	default:
+		out = append(out, "GIT_SSH_COMMAND="+defaultGitSSHCommand)
+	}
+	return out
+}
+
+func isGitAuthFailure(output string) bool {
+	lower := strings.ToLower(output)
+	for _, pat := range gitAuthFailurePatterns {
+		if strings.Contains(lower, strings.ToLower(pat)) {
+			return true
+		}
+	}
+	return false
+}
+
+func formatGitCommandError(dir string, args []string, err error, out []byte) error {
+	redactedArgs := make([]string, len(args))
+	for i, a := range args {
+		redactedArgs[i] = sanitizeDiagnostic(RedactRepoURL(a), dir)
+	}
+	outStr := sanitizeDiagnostic(strings.TrimSpace(string(out)), dir)
+	msg := fmt.Errorf("git %s: %w (%s)", strings.Join(redactedArgs, " "), err, outStr)
+	if len(args) > 0 && (args[0] == "clone" || args[0] == "pull" || args[0] == "fetch" || args[0] == "checkout") && isGitAuthFailure(outStr) {
+		return fmt.Errorf("%w: %s", msg, privateRepoAuthHint)
+	}
+	return msg
+}
+
 func runGit(ctx context.Context, dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = gitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return formatGitCommandError(dir, args, err, out)
 	}
 	return nil
 }

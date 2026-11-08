@@ -98,6 +98,7 @@ func (s *Store) GetRevisionStats(ctx context.Context, window, project string) (S
 		if err := rows.Scan(&v.Project, &v.GitSHA, &v.PreviousSHA, &v.DetectedAt, &v.Baseline, &v.Current, &synced, &v.SyncError, &first, &v.Runs, &v.OKRuns, &v.CrashRuns, &v.ErrorRuns, &v.TestedTargets, &v.ActiveTargets, &v.ReplayPassed, &v.ReplayFailed, &v.ReplayBlocked, &v.ReplayPending); err != nil {
 			return StatsSeries{}, err
 		}
+		v.SyncError = RedactSyncError(v.SyncError)
 		if synced.Valid {
 			v.LastSynced = &synced.Time
 		}

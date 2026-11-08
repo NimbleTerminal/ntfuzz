@@ -13,10 +13,11 @@ This cookbook walks through deploying your own public or internal `ntfuzz` conti
 5. [Day-2 Operator Workflows](#5-day-2-operator-workflows)
    - [Triage & Mark Crashes Fixed via SSH Tunnel](#51-triage--mark-crashes-fixed-via-ssh-tunnel)
    - [Adding Repositories & Tuning Fuzz Budgets](#52-adding-repositories--tuning-fuzz-budgets)
-   - [Customizing Browser Dashboard Branding](#53-customizing-browser-dashboard-branding)
-   - [Upgrading `ntfuzz` & Schema Migrations](#54-upgrading-ntfuzz--schema-migrations)
-   - [Prometheus Metrics & Alerting](#55-prometheus-metrics--alerting)
-   - [Backups & Volume Recovery](#56-backups--volume-recovery)
+   - [Private repositories](#53-private-repositories)
+   - [Customizing Browser Dashboard Branding](#54-customizing-browser-dashboard-branding)
+   - [Upgrading `ntfuzz` & Schema Migrations](#55-upgrading-ntfuzz--schema-migrations)
+   - [Prometheus Metrics & Alerting](#56-prometheus-metrics--alerting)
+   - [Backups & Volume Recovery](#57-backups--volume-recovery)
 
 ---
 
@@ -331,7 +332,105 @@ sudo systemctl restart ntfuzz-serve.service
 
 `ntfuzz serve` will clone any new repositories into `/var/lib/ntfuzz/repos/<name>`, discover all native `FuzzXxx(f *testing.F)` targets across all Go modules in the repo, and schedule them onto the worker pool.
 
-### 5.3 Customizing Browser Dashboard Branding
+### 5.3 Private repositories
+
+#### The Model: `git` Holds the Credentials, Not `ntfuzz`
+
+`ntfuzz` never stores tokens, SSH keys, or passwords in `projects.yaml` or in DuckDB—`git` and `ssh` in the service user's environment handle authentication directly. At startup, `ntfuzz` rejects any `repo` URL with embedded userinfo (`https://user:token@host/...`) so credentials never leak into YAML, Terraform state, or the public snapshot viewer.
+
+Every `git` subprocess runs with `GIT_TERMINAL_PROMPT=0` and (when `GIT_SSH_COMMAND` is unset) `GIT_SSH_COMMAND=ssh -o BatchMode=yes`, overridable via `NTFUZZ_GIT_SSH_COMMAND`. Misconfigured or missing credentials therefore fail immediately instead of hanging on an interactive prompt, and surface as a redacted project `sync_error` in `/api/projects` and the TUI.
+
+#### SSH Deploy Key (Preferred)
+
+Generate an `ed25519` key as the `ntfuzz` service user under `/var/lib/ntfuzz/.ssh`, set `0700`/`0600` permissions, pre-seed `known_hosts` with GitHub's host keys so `BatchMode=yes` does not fail on first connection, and register the public key as a **read-only** deploy key on the repository:
+
+```bash
+sudo install -d -m 0700 -o ntfuzz -g ntfuzz /var/lib/ntfuzz/.ssh
+sudo runuser -u ntfuzz -- env HOME=/var/lib/ntfuzz \
+  ssh-keygen -t ed25519 -N "" -C "ntfuzz@$(hostname -f)" -f /var/lib/ntfuzz/.ssh/id_ed25519
+sudo runuser -u ntfuzz -- sh -c 'ssh-keyscan -t ed25519,rsa github.com >> /var/lib/ntfuzz/.ssh/known_hosts'
+sudo chmod 0600 /var/lib/ntfuzz/.ssh/id_ed25519 /var/lib/ntfuzz/.ssh/known_hosts
+sudo chmod 0644 /var/lib/ntfuzz/.ssh/id_ed25519.pub
+```
+
+Then reference the repository in `/etc/ntfuzz/projects.yaml` using standard SSH syntax:
+
+```yaml
+projects:
+  - name: private-service
+    repo: git@github.com:Org/repo.git
+    branch: main
+    fuzztime: 20s
+```
+
+> **Multiple private repositories on GitHub**: GitHub allows a given SSH key to be attached as a deploy key to only one repository. To fuzz several private repositories:
+> 1. **Machine user key**: add a single key to a dedicated read-only machine user account with access to those repositories, or
+> 2. **Per-repo deploy keys with `~/.ssh/config` host aliases**: generate one key per repository (`/var/lib/ntfuzz/.ssh/id_repo_a`, `/var/lib/ntfuzz/.ssh/id_repo_b`), define a host alias per repo in `/var/lib/ntfuzz/.ssh/config` (`chmod 0600`, owned by `ntfuzz:ntfuzz`), and use `git@github-repo-a:Org/repo-a.git` in `projects.yaml`:
+>    ```sshconfig
+>    Host github-repo-a
+>        HostName github.com
+>        User git
+>        IdentityFile /var/lib/ntfuzz/.ssh/id_repo_a
+>        IdentitiesOnly yes
+>    ```
+
+#### HTTPS with a Credential Helper or `insteadOf`
+
+If you prefer HTTPS over SSH, use a fine-grained read-only Personal Access Token (PAT) stored in the `ntfuzz` user's global Git configuration—either via `git credential-store` or a `url.<base>.insteadOf` rewrite rule:
+
+```bash
+# Option A: git credential-store (~/.git-credentials, mode 0600)
+sudo runuser -u ntfuzz -- env HOME=/var/lib/ntfuzz \
+  git config --global credential.helper 'store --file /var/lib/ntfuzz/.git-credentials'
+sudo install -m 0600 -o ntfuzz -g ntfuzz /dev/null /var/lib/ntfuzz/.git-credentials
+sudo sh -c 'printf "https://x-access-token:ghp_REPLACE_WITH_READONLY_PAT@github.com\n" > /var/lib/ntfuzz/.git-credentials'
+
+# Option B: global URL rewrite in /var/lib/ntfuzz/.gitconfig
+sudo runuser -u ntfuzz -- env HOME=/var/lib/ntfuzz \
+  git config --global url."https://x-access-token:ghp_REPLACE_WITH_READONLY_PAT@github.com/".insteadOf "https://github.com/"
+sudo chmod 0600 /var/lib/ntfuzz/.gitconfig
+```
+
+Both approaches keep `/etc/ntfuzz/projects.yaml` clean (`repo: https://github.com/Org/repo.git`). Placing a token directly inside the YAML `repo` URL is rejected at startup.
+
+#### Private Go Module Dependencies
+
+`go test` also runs as `User=ntfuzz`, so when a fuzz target imports private Go modules from your organization, set `GOPRIVATE` in `/etc/ntfuzz/ntfuzz.env` (loaded via `EnvironmentFile` in `ntfuzz-serve.service`):
+
+```dotenv
+GOPRIVATE="github.com/Org/*"
+```
+
+`go` automatically derives `GONOPROXY` and `GONOSUMDB` from `GOPRIVATE` unless overridden, and uses the same SSH keys or HTTPS Git credentials configured above when fetching private module dependencies into `/var/lib/ntfuzz/cache/gomod`.
+
+#### `systemd` Specifics & Infrastructure Persistence
+
+In production, `ntfuzz-serve.service` runs as `User=ntfuzz` with `HOME=/var/lib/ntfuzz`. All SSH keys, `known_hosts`, `.gitconfig`, and `.git-credentials` files must be owned by `ntfuzz:ntfuzz` under `/var/lib/ntfuzz` (use `sudo runuser -u ntfuzz -- env HOME=/var/lib/ntfuzz ...` rather than configuring `/root`).
+
+Anything placed on the host by hand—or outside the persistent `/var/lib/ntfuzz` volume—should also be recorded in your provisioning script, Terraform / `cloud-init` template (`deploy/terraform/digitalocean/cloud-init.yaml.tftpl`), or configuration management so a rebuilt machine retains its configuration and `/etc/ntfuzz/ntfuzz.env` settings.
+
+#### Verification
+
+Before restarting `ntfuzz-serve`, verify that `git ls-remote` succeeds non-interactively as the `ntfuzz` user:
+
+```bash
+sudo runuser -u ntfuzz -- env HOME=/var/lib/ntfuzz git ls-remote git@github.com:Org/repo.git
+```
+
+Then restart the writer and verify that `/api/projects` shows a clean `last_synced` timestamp and empty `sync_error` for the private project:
+
+```bash
+sudo systemctl restart ntfuzz-serve.service
+curl -s http://127.0.0.1:8080/api/projects | jq .
+```
+
+#### Security Notes
+
+- **Public visibility of `repo`**: The public `ntfuzz view` process serves `/api/projects` to anonymous readers, so the `repo` URL string (and project name) is visible to anyone who can access the viewer.
+- **Least privilege**: Always use read-only deploy keys or fine-grained read-only PATs scoped only to the repositories being fuzzed.
+- **Rotation**: Rotate credentials by replacing `/var/lib/ntfuzz/.ssh/id_ed25519` or updating `/var/lib/ntfuzz/.git-credentials` / `.gitconfig`, revoking the old key or PAT upstream, and running `sudo systemctl restart ntfuzz-serve.service`.
+
+### 5.4 Customizing Browser Dashboard Branding
 
 Both `ntfuzz serve` and `ntfuzz view` read branding settings from `/etc/ntfuzz/ntfuzz.env` (or `--brand-*` CLI flags):
 
@@ -339,6 +438,8 @@ Both `ntfuzz serve` and `ntfuzz view` read branding settings from `/etc/ntfuzz/n
 NTFUZZ_BRAND_NAME="NimbleTerminal"
 NTFUZZ_BRAND_URL="https://nimbleterminal.com"
 NTFUZZ_BRAND_ACCENT="#58A6FF"
+# Optional: override the git SSH command used by ntfuzz serve (defaults to "ssh -o BatchMode=yes")
+# NTFUZZ_GIT_SSH_COMMAND="ssh -o BatchMode=yes -F /var/lib/ntfuzz/.ssh/config"
 ```
 
 Restart both services after editing `/etc/ntfuzz/ntfuzz.env`:
@@ -347,7 +448,7 @@ Restart both services after editing `/etc/ntfuzz/ntfuzz.env`:
 sudo systemctl restart ntfuzz-serve.service ntfuzz-view.service
 ```
 
-### 5.4 Upgrading `ntfuzz` & Schema Migrations
+### 5.5 Upgrading `ntfuzz` & Schema Migrations
 
 When upgrading `ntfuzz` to a new release (especially across a DuckDB schema version bump):
 
@@ -367,7 +468,7 @@ When upgrading `ntfuzz` to a new release (especially across a DuckDB schema vers
    sudo systemctl restart ntfuzz-view.service
    ```
 
-### 5.5 Prometheus Metrics & Alerting
+### 5.6 Prometheus Metrics & Alerting
 
 By default in the systemd units:
 - `ntfuzz-serve` exposes `/metrics` on `http://127.0.0.1:9090/metrics`
@@ -379,7 +480,7 @@ Recommended alerts for production monitoring:
 - **Viewer refresh errors**: `rate(ntfuzz_snapshot_refreshes_total{result="error"}[5m]) > 0`.
 - **Terminal session saturation**: `rate(ntfuzz_terminal_sessions_rejected_total[5m]) > 0`.
 
-### 5.6 Backups & Volume Recovery
+### 5.7 Backups & Volume Recovery
 
 All persistent state lives under `/var/lib/ntfuzz`:
 - **Published snapshots (`/var/lib/ntfuzz/public/snapshot-*.duckdb`)** are already point-in-time, self-contained DuckDB files created via `COPY FROM DATABASE` (with the two newest snapshot files retained automatically). You can copy the latest `snapshot-*.duckdb` directly to object storage (S3 / DigitalOcean Spaces) on a cron schedule without stopping `ntfuzz-serve`!

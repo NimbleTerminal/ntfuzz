@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"nimbleterminal.dev/ntduckbox"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -545,6 +547,96 @@ func (s *Store) UpsertProject(ctx context.Context, name, repo, branch string, sy
 	})
 }
 
+var (
+	redactSecretRe  = regexp.MustCompile(`(?i)(token|password|secret|authorization|api[_-]?key)([=: ]+(?:(?:token|bearer|basic)\s+)?)[^\s'"]+`)
+	redactHTTPURLRe = regexp.MustCompile(`(https?://|git://)[^/\s@'"]+@`)
+	redactSSHURLRe  = regexp.MustCompile(`(ssh://)[^/\s@'"]*:[^/\s@'"]+@`)
+)
+
+// HasEmbeddedRepoCredentials reports whether a repository URL contains embedded
+// userinfo credentials (e.g., https://user:token@host/..., https://token@host/...,
+// ssh://user:pass@host/..., or user:pass@host:path). Standard SSH syntax without
+// a password (git@host:path or ssh://git@host/path) returns false.
+func HasEmbeddedRepoCredentials(repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return false
+	}
+	if strings.Contains(repo, "://") {
+		if u, err := url.Parse(repo); err == nil && u.User != nil {
+			if strings.EqualFold(u.Scheme, "ssh") {
+				_, hasPass := u.User.Password()
+				return hasPass
+			}
+			return true
+		}
+		schemeIdx := strings.Index(repo, "://")
+		scheme := strings.ToLower(repo[:schemeIdx])
+		rest := repo[schemeIdx+3:]
+		if slashIdx := strings.IndexByte(rest, '/'); slashIdx >= 0 {
+			rest = rest[:slashIdx]
+		}
+		if atIdx := strings.LastIndexByte(rest, '@'); atIdx >= 0 {
+			userinfo := rest[:atIdx]
+			if scheme == "ssh" {
+				return strings.Contains(userinfo, ":")
+			}
+			return true
+		}
+		return false
+	}
+	if atIdx := strings.IndexByte(repo, '@'); atIdx > 0 {
+		beforeAt := repo[:atIdx]
+		if !strings.ContainsAny(beforeAt, `/\`) && strings.Contains(beforeAt, ":") {
+			return true
+		}
+	}
+	return false
+}
+
+// RedactRepoURL strips embedded credentials from a repository URL as defense in depth.
+func RedactRepoURL(repo string) string {
+	if !HasEmbeddedRepoCredentials(repo) {
+		return repo
+	}
+	if strings.Contains(repo, "://") {
+		schemeIdx := strings.Index(repo, "://")
+		prefix := repo[:schemeIdx+3]
+		rest := repo[schemeIdx+3:]
+		slashIdx := strings.IndexByte(rest, '/')
+		hostPart := rest
+		pathPart := ""
+		if slashIdx >= 0 {
+			hostPart = rest[:slashIdx]
+			pathPart = rest[slashIdx:]
+		}
+		if atIdx := strings.LastIndexByte(hostPart, '@'); atIdx >= 0 {
+			return prefix + "<redacted>@" + hostPart[atIdx+1:] + pathPart
+		}
+	}
+	if atIdx := strings.IndexByte(repo, '@'); atIdx > 0 {
+		return "<redacted>@" + repo[atIdx+1:]
+	}
+	return redactHTTPURLRe.ReplaceAllString(repo, "${1}<redacted>@")
+}
+
+// RedactSyncError redacts URL credentials and labeled secrets from a sync error or diagnostic string.
+func RedactSyncError(s string) string {
+	if s == "" {
+		return ""
+	}
+	s = redactHTTPURLRe.ReplaceAllString(s, "${1}<redacted>@")
+	s = redactSSHURLRe.ReplaceAllString(s, "${1}<redacted>@")
+	s = redactSecretRe.ReplaceAllString(s, "${1}${2}<redacted>")
+	s = strings.Map(func(r rune) rune {
+		if r < 32 && r != '\n' && r != '\t' || r == 127 {
+			return -1
+		}
+		return r
+	}, s)
+	return sanitizeUTF8(s)
+}
+
 // SyncProject records project checkout state, revision (git_sha + dirty), and any sync error.
 // If in.SyncedAt is nil (e.g. a failed git pull), last_synced is NOT advanced, and sync_error is recorded.
 func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, error) {
@@ -553,6 +645,9 @@ func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, er
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	in.Repo = RedactRepoURL(in.Repo)
+	in.SyncError = RedactSyncError(in.SyncError)
 
 	var id int64
 	err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE name = ?`, in.Name).Scan(&id)
@@ -1031,6 +1126,8 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 		); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
+		p.Repo = RedactRepoURL(p.Repo)
+		p.SyncError = RedactSyncError(p.SyncError)
 		if lastSynced.Valid {
 			t := lastSynced.Time
 			p.LastSynced = &t

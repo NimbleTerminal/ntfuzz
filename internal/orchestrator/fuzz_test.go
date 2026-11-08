@@ -68,6 +68,9 @@ projects:
 			if p.Repo == "" || p.Repo != strings.TrimSpace(p.Repo) {
 				t.Fatalf("project[%d] has untrimmed or empty Repo %q", i, p.Repo)
 			}
+			if RedactRepoURL(p.Repo) != p.Repo {
+				t.Fatalf("project[%d] accepted Repo with embedded credentials %q", i, p.Repo)
+			}
 			if eff := p.EffectiveFuzzTime(cfg.DefaultFuzzTime); eff <= 0 {
 				t.Fatalf("project[%d] EffectiveFuzzTime returned %v", i, eff)
 			}

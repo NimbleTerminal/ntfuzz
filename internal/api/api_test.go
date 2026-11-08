@@ -474,3 +474,41 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectsSyncErrorAndRepoRedaction(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "redact.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	_, err = st.SyncProject(ctx, store.ProjectSyncInput{
+		Name:      "private-lib",
+		Repo:      "https://user:ghp_abc@github.com/org/private-lib.git",
+		Branch:    "main",
+		SyncError: "git clone https://user:ghp_abc@github.com/org/private-lib.git: Authorization: token ghp_secret999",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(NewServer(st, nil))
+	defer srv.Close()
+
+	client := NewClient(srv.URL)
+	projects, err := client.GetProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(projects))
+	}
+	p := projects[0]
+	if strings.Contains(p.Repo, "ghp_abc") || p.Repo != "https://<redacted>@github.com/org/private-lib.git" {
+		t.Fatalf("expected redacted Repo, got %q", p.Repo)
+	}
+	if strings.Contains(p.SyncError, "ghp_abc") || strings.Contains(p.SyncError, "ghp_secret999") {
+		t.Fatalf("expected redacted SyncError, got %q", p.SyncError)
+	}
+}

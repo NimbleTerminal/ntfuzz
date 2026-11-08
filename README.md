@@ -124,6 +124,8 @@ projects:
     public_inputs: true # Allow GET /api/crashes/{id}/input in public snapshot view mode
 ```
 
+> **Private repositories**: `ntfuzz` relies on `git`'s own authentication in the service user's environment (SSH deploy keys, `git credential-store`, or `url.<base>.insteadOf`) and rejects embedded credentials (`https://user:token@host/...`) in `repo` URLs. See **[Private repositories in `docs/deployment-cookbook.md`](docs/deployment-cookbook.md#53-private-repositories)** for setup instructions.
+
 ---
 
 ## TUI Keybindings & Booba Terminal Actions
@@ -215,6 +217,7 @@ Branding is configured via CLI flags or environment variables (independent of `p
 | `--brand-name` | `NTFUZZ_BRAND_NAME` | `""` (omitted) | Rendered as escaped plain text beside `NTFUZZ` (truncates with ellipsis on narrow screens) |
 | `--brand-url` | `NTFUZZ_BRAND_URL` | `""` (unlinked) | Optional website link for `--brand-name`; must be a valid `http://` or `https://` URL |
 | `--brand-accent` | `NTFUZZ_BRAND_ACCENT` | `#38bdf8` | Scoped `--ntfuzz-accent` color on `.topbar`; must match 6-digit `#RRGGBB` hex |
+| *(env only)* | `NTFUZZ_GIT_SSH_COMMAND` | `ssh -o BatchMode=yes` (when `GIT_SSH_COMMAND` is unset) | Overrides `GIT_SSH_COMMAND` for `git` subprocesses in `ntfuzz serve` (`GIT_TERMINAL_PROMPT=0` is always set) |
 
 ### Generic Example
 
