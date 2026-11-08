@@ -13,7 +13,7 @@ func TestRevisionRecoveryLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	at := time.Now().UTC().Add(-time.Minute)
 	in := ProjectSyncInput{Name: "repo", Repo: "https://example.test/repo", GitSHA: "old", SyncedAt: &at}
 	pid, err := s.SyncProject(ctx, in)
@@ -118,7 +118,7 @@ func TestRevisionRecoveryLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 	visible, err := ro.GetRevisionStats(ctx, "24h", "repo")
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestRevisionMigrationFromV3(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	stats, err := s.GetRevisionStats(ctx, "24h", "")
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestQuietCurrentRevisionsRemainVisible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ctx := context.Background()
 	old := time.Now().UTC().Add(-48 * time.Hour)
 	if _, err = s.SyncProject(ctx, ProjectSyncInput{Name: "quiet", Repo: "local", GitSHA: "old", SyncedAt: &old}); err != nil {

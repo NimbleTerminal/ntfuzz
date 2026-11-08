@@ -779,4 +779,21 @@ func TestCrashesAndBurndownDistinguishReportedAndDependencyBlame(t *testing.T) {
 	if strings.Contains(fleetView, "ghp_abc") || strings.Contains(fleetView, "ghp_xyz") {
 		t.Fatalf("expected TUI project sync error banner to redact credentials, got:\n%s", fleetView)
 	}
+
+	// Verify fleet crashes view does not misclassify another project's reported crash as unreported when a project filter is active
+	m.projects = []api.Project{
+		{ID: 1, Name: "nt3d"},
+		{ID: 2, Name: "other-proj"},
+	}
+	m.projectIdx = 1 // Filter active on "nt3d"
+	m.openCrashes[1].ProjectName = "other-proj"
+	m.openCrashes[1].IssueURL = "https://github.com/example/other/issues/1"
+	filteredCrashesView := m.renderCrashesView()
+	if !strings.Contains(filteredCrashesView, "(2: 0 unreported, 2 reported)") {
+		t.Fatalf("expected fleet crashes header to show (2: 0 unreported, 2 reported) even with project filter active, got:\n%s", filteredCrashesView)
+	}
+	u, r := m.openCrashSplit("nt3d", 1)
+	if u != 0 || r != 1 {
+		t.Fatalf("expected project-scoped openCrashSplit('nt3d', 1) = (0, 1), got (%d, %d)", u, r)
+	}
 }

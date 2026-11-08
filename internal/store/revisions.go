@@ -89,7 +89,7 @@ func (s *Store) GetRevisionStats(ctx context.Context, window, project string) (S
 	if err != nil {
 		return StatsSeries{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := StatsSeries{Query: StatsQueryRevisions, Window: win, BucketSeconds: seconds, Project: project, Revisions: []Revision{}, Buckets: []StatsBucket{}}
 	counts := map[int64]*StatsBucket{}
 	for rows.Next() {
@@ -167,18 +167,19 @@ func (s *Store) RecordReplay(ctx context.Context, c Crash, r CrashReplay) error 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, `INSERT INTO crash_replays VALUES(?,?,?,?,?,?) ON CONFLICT(crash_id,git_sha,input_hash) DO UPDATE SET checked_at=excluded.checked_at,outcome=excluded.outcome,diagnostic=excluded.diagnostic`, c.ID, r.GitSHA, c.InputHash, r.CheckedAt, r.Outcome, r.Diagnostic)
 	if err != nil {
 		return err
 	}
-	if r.Outcome == "passed" {
+	switch r.Outcome {
+	case "passed":
 		_, err = tx.ExecContext(ctx, `INSERT INTO crash_events(crash_id,event_at,kind,delta) SELECT id,CAST(? AS TIMESTAMP),'resolved',-1 FROM crashes WHERE id=? AND input_hash=? AND last_seen<=? AND fixed_at IS NULL`, r.CheckedAt.UTC().Format("2006-01-02 15:04:05.999999"), c.ID, c.InputHash, r.CheckedAt)
 		if err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE crashes SET fixed_at=COALESCE(fixed_at,?) WHERE id=? AND input_hash=? AND last_seen<=?`, r.CheckedAt, c.ID, c.InputHash, r.CheckedAt)
-	} else if r.Outcome == "failed" {
+	case "failed":
 		_, err = tx.ExecContext(ctx, `INSERT INTO crash_events(crash_id,event_at,kind,delta) SELECT id,CAST(? AS TIMESTAMP),'reopened',1 FROM crashes WHERE id=? AND input_hash=? AND fixed_at IS NOT NULL`, r.CheckedAt.UTC().Format("2006-01-02 15:04:05.999999"), c.ID, c.InputHash)
 		if err != nil {
 			return err
@@ -198,7 +199,7 @@ func (s *Store) ListCrashReplays(ctx context.Context) ([]CrashReplay, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := []CrashReplay{}
 	for rows.Next() {
 		var r CrashReplay

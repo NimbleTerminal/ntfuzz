@@ -40,7 +40,7 @@ func replayCrash(ctx context.Context, job JobSpec, c store.Crash) (outcome, diag
 	if err != nil {
 		return blocked(err)
 	}
-	defer os.RemoveAll(root)
+	defer func() { _ = os.RemoveAll(root) }()
 	moduleDir, err := filepath.Abs(job.RepoDir)
 	if err != nil {
 		return blocked(err)

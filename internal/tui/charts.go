@@ -164,7 +164,7 @@ func (m Model) renderStatsView() string {
 
 	switch activeQ.ID {
 	case api.StatsQueryBurndown:
-		openUnreported, openReported := m.openCrashSplit(stats.OpenCrashes)
+		openUnreported, openReported := m.openCrashSplit(m.currentProjectFilter(), stats.OpenCrashes)
 		b.WriteString(ansi.Truncate(fmt.Sprintf("Open: %d (%d unreported, %d reported) • New: %d • Reopened: %d • Resolved: %d", stats.OpenCrashes, openUnreported, openReported, stats.NewCrashes, stats.ReopenedCrashes, stats.ResolvedCrashes), contentWidth, "…") + "\n")
 		points := make([]timeserieslinechart.TimePoint, 0, len(stats.Buckets))
 		for _, bk := range stats.Buckets {
@@ -304,8 +304,8 @@ func renderDualTimeSeriesChart(
 		}
 	}
 
-	minY2, maxY2 := seriesValueBounds(rightPts)
-	minY2 = 0
+	_, maxY2 := seriesValueBounds(rightPts)
+	minY2 := 0.0
 	maxY2 = math.Ceil(maxY2 * 1.15)
 	if maxY2 <= minY2 {
 		maxY2 = 10
@@ -519,7 +519,7 @@ func (m Model) renderRevisionStats(width, height int) string {
 	pageSize := max(1, (height-lipgloss.Height(chart.View())-3)/2)
 	pages := (len(stats.Revisions) + pageSize - 1) / pageSize
 	page := min(m.revisionPage, pages-1)
-	b.WriteString(ansi.Truncate(fmt.Sprintf("REPO / REVISION          RUNS ok/crash/error    REPLAY pass/fail/blocked/pending"), width, "…") + "\n")
+	b.WriteString(ansi.Truncate("REPO / REVISION          RUNS ok/crash/error    REPLAY pass/fail/blocked/pending", width, "…") + "\n")
 	start := page * pageSize
 	end := min(start+pageSize, len(stats.Revisions))
 	for _, v := range stats.Revisions[start:end] {

@@ -144,6 +144,19 @@ func (s *Store) copySnapshotLocked(ctx context.Context, path string) error {
 	if _, err := conn.ExecContext(ctx, `COPY FROM DATABASE "`+strings.ReplaceAll(source, `"`, `""`)+`" TO ntfuzz_publish`); err != nil {
 		return err
 	}
+	// Strip reproducer blobs for projects that have not opted into public_inputs
+	// so published snapshot files only contain inputs intended for public download.
+	if _, err := conn.ExecContext(ctx, `
+		UPDATE ntfuzz_publish.crashes
+		SET input_bytes = NULL, input_truncated = FALSE
+		WHERE target_id IN (
+			SELECT t.id FROM ntfuzz_publish.targets t
+			JOIN ntfuzz_publish.projects p ON p.id = t.project_id
+			WHERE NOT COALESCE(p.public_inputs, FALSE)
+		)
+	`); err != nil {
+		return err
+	}
 	// Explicit detach errors matter: the file cannot be published while open.
 	_, err = conn.ExecContext(ctx, "DETACH ntfuzz_publish")
 	if err == nil {

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"nimbleterminal.dev/ntduckbox"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -449,6 +451,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 				return fmt.Errorf("migration v%d (%q): %w", m.version, stmt, err)
 			}
 		}
+		if m.version == 6 {
+			if err := s.recomputeCrashFingerprints(ctx); err != nil {
+				return fmt.Errorf("migration v6 recompute crash fingerprints: %w", err)
+			}
+		}
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
 			m.version, now,
@@ -805,7 +812,7 @@ func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var id int64
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO runs (
@@ -831,6 +838,84 @@ func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 		}
 	}
 	return id, tx.Commit()
+}
+
+var (
+	reFPFileLine       = regexp.MustCompile(`(?m)([A-Za-z0-9_./\\@!~+-]+\.go):\d+(\s*\+0x[0-9a-fA-F]+)?`)
+	reFPLegacyFileLine = regexp.MustCompile(`(?m)([A-Za-z0-9_./\\-]+\.go):\d+(\s*\+0x[0-9a-fA-F]+)?`)
+	reFPHexAddr        = regexp.MustCompile(`0x[0-9a-fA-F]+`)
+	reFPGoroutine      = regexp.MustCompile(`goroutine \d+`)
+	reFPFailDuration   = regexp.MustCompile(`\([0-9.]+s\)`)
+	reFPPkgFailDur     = regexp.MustCompile(`(FAIL\t\S+\t)[0-9.]+s`)
+)
+
+// FingerprintStack normalizes a crash stack by stripping directory paths, line numbers,
+// test durations, hex pointers, and goroutine IDs so line shifts and path scrubbing
+// produce identical fingerprints.
+func FingerprintStack(stack string) string {
+	return fingerprintStackWithFileLine(stack, reFPFileLine)
+}
+
+// LegacyFingerprintStack computes the pre-v6 stack fingerprint using the older path character class
+// so historical crash rows that have not been recomputed still match on deduplication.
+func LegacyFingerprintStack(stack string) string {
+	return fingerprintStackWithFileLine(stack, reFPLegacyFileLine)
+}
+
+func fingerprintStackWithFileLine(stack string, fileLineRe *regexp.Regexp) string {
+	trimmed := strings.TrimSpace(stack)
+	if trimmed == "" {
+		return ""
+	}
+	normalized := reFPFailDuration.ReplaceAllString(trimmed, "(0s)")
+	normalized = reFPPkgFailDur.ReplaceAllString(normalized, "${1}0s")
+	normalized = reFPGoroutine.ReplaceAllString(normalized, "goroutine N")
+	normalized = fileLineRe.ReplaceAllStringFunc(normalized, func(m string) string {
+		colon := strings.IndexByte(m, ':')
+		if colon < 0 {
+			return m
+		}
+		return filepath.Base(m[:colon])
+	})
+	normalized = reFPHexAddr.ReplaceAllString(normalized, "0xADDR")
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:12])
+}
+
+func (s *Store) recomputeCrashFingerprints(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(stack, '') FROM crashes WHERE COALESCE(stack, '') <> ''`)
+	if err != nil {
+		return err
+	}
+	type item struct {
+		id    int64
+		stack string
+	}
+	var items []item
+	for rows.Next() {
+		var it item
+		if err := rows.Scan(&it.id, &it.stack); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+
+	for _, it := range items {
+		fp := FingerprintStack(it.stack)
+		if fp == "" {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE crashes SET stack_fingerprint = ? WHERE id = ?`, fp, it.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sanitizeUTF8(s string) string {
@@ -883,18 +968,29 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 	}
 	inputHex := hex.EncodeToString(inputBytes)
 
+	legacyFP := ""
+	if c.Stack != "" {
+		legacyFP = LegacyFingerprintStack(c.Stack)
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var existingID int64
 	var fixed sql.NullTime
 	err = tx.QueryRowContext(ctx,
 		`SELECT id,fixed_at FROM crashes
-		 WHERE target_id = ? AND (input_hash = ? OR (? != '' AND stack_fingerprint = ?))
+		 WHERE target_id = ? AND (
+		     input_hash = ?
+		     OR (? != '' AND stack_fingerprint = ?)
+		     OR (? != '' AND stack_fingerprint = ?)
+		 )
 		 ORDER BY id ASC LIMIT 1`,
-		c.TargetID, c.InputHash, c.StackFingerprint, c.StackFingerprint,
+		c.TargetID, c.InputHash,
+		c.StackFingerprint, c.StackFingerprint,
+		legacyFP, legacyFP,
 	).Scan(&existingID, &fixed)
 	if errors.Is(err, sql.ErrNoRows) {
 		var id int64
@@ -1012,7 +1108,7 @@ func (s *Store) MarkCrashFixed(ctx context.Context, crashID int64, fixedAt time.
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, `INSERT INTO crash_events(crash_id,event_at,kind,delta) SELECT id,CAST(? AS TIMESTAMP),'resolved',-1 FROM crashes WHERE id=? AND fixed_at IS NULL`, fixedAt.UTC().Format("2006-01-02 15:04:05.999999"), crashID)
 	if err != nil {
 		return err

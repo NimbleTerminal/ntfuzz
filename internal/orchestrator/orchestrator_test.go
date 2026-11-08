@@ -609,4 +609,33 @@ func TestPrivateRepoSyncRedactionEnvAndAuthHint(t *testing.T) {
 			t.Fatalf("did not expect auth hint on non-auth failure, got: %v", nonAuthErr)
 		}
 	})
+
+	// 4. Failing-input path confinement under module or corpus tree
+	t.Run("failing input path confinement", func(t *testing.T) {
+		root := t.TempDir()
+		repoDir := filepath.Join(root, "repo")
+		pkgDir := filepath.Join(repoDir, "sub")
+		corpusDir := filepath.Join(root, "corpus")
+		outsideFile := filepath.Join(root, "outside-secret.txt")
+		insideFile := filepath.Join(pkgDir, "testdata", "fuzz", "FuzzX", "1234")
+		if err := os.MkdirAll(filepath.Dir(insideFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(outsideFile, []byte("secret"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(insideFile, []byte("go test fuzz v1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, ok := resolveSafeCrashInputPath("testdata/fuzz/FuzzX/1234", pkgDir, repoDir, corpusDir); !ok {
+			t.Fatal("expected relative testdata/fuzz path inside pkgDir to be accepted")
+		}
+		if _, ok := resolveSafeCrashInputPath("../../outside-secret.txt", pkgDir, repoDir, corpusDir); ok {
+			t.Fatal("expected traversal path outside repo/corpus to be rejected")
+		}
+		if _, ok := resolveSafeCrashInputPath(outsideFile, pkgDir, repoDir, corpusDir); ok {
+			t.Fatal("expected absolute path outside repo/corpus to be rejected")
+		}
+	})
 }

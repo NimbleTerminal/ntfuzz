@@ -228,7 +228,7 @@ func TestRevisionAndReplayEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	now := time.Now().UTC()
 	if _, err = st.SyncProject(ctx, store.ProjectSyncInput{Name: "repo", Repo: "local", GitSHA: "abc", SyncedAt: &now}); err != nil {
 		t.Fatal(err)
@@ -472,6 +472,32 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 		if !strings.Contains(md, wantMD) {
 			t.Errorf("Markdown report missing %q:\n%s", wantMD, md)
 		}
+	}
+
+	// Reject injected public_url values (newlines, non-http schemes, markdown delimiters) and ignore poisoned Host/X-Forwarded-Proto.
+	badReportResp, err := http.Get(fmt.Sprintf("%s/api/crashes/%d/report.md?public_url=https://evil.example%%0a%%0ainjected", snapSrv.URL, pubCrashID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = badReportResp.Body.Close()
+	if badReportResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for newline-injected public_url, got %d", badReportResp.StatusCode)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/crashes/%d/report.md", snapSrv.URL, pubCrashID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "evil.example.invalid"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	hostResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostBody, _ := io.ReadAll(hostResp.Body)
+	_ = hostResp.Body.Close()
+	if strings.Contains(string(hostBody), "evil.example.invalid") {
+		t.Fatalf("did not expect untrusted Host header to be reflected into report.md:\n%s", string(hostBody))
 	}
 }
 

@@ -41,7 +41,7 @@ func drainGraphics(t *testing.T, m Model, cmd tea.Cmd) (Model, string) {
 			continue
 		}
 		if r, ok := msg.(tea.RawMsg); ok {
-			raw.WriteString(fmt.Sprint(r.Msg))
+			_, _ = fmt.Fprint(&raw, r.Msg)
 			continue
 		}
 		next, follow := m.Update(msg)

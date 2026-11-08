@@ -49,7 +49,7 @@ func (s *Store) GetBurndown(ctx context.Context, window, project, target string)
 	if err != nil {
 		return out, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	buckets := map[int64]StatsBucket{}
 	balance := 0
 	for rows.Next() {

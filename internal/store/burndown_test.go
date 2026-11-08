@@ -13,7 +13,7 @@ func TestBurndownLifecycleAndSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	p, err := s.UpsertProject(ctx, "demo", "local", "", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestBurndownLifecycleAndSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 	public, err := ro.GetBurndown(ctx, "1h", "demo", "")
 	if err != nil || public.OpenCrashes != 1 || public.ResolvedCrashes != 2 {
 		t.Fatalf("snapshot: %+v %v", public, err)
@@ -112,12 +112,12 @@ func TestBurndownMigrationLabelsReconstructedHistory(t *testing.T) {
 	if _, err = s.db.Exec(`DROP TABLE crash_events;DROP TABLE crash_tracking;DELETE FROM schema_migrations WHERE version=5`); err != nil {
 		t.Fatal(err)
 	}
-	s.Close()
+	_ = s.Close()
 	s, err = Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	stats, err := s.GetBurndown(ctx, "24h", "", "")
 	if err != nil {
 		t.Fatal(err)

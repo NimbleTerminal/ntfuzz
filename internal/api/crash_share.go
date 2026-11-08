@@ -103,19 +103,57 @@ func ValidateIssueURL(raw string) error {
 	return nil
 }
 
-func (s *Server) resolveCrashInputBytes(c store.Crash) ([]byte, bool) {
-	if len(c.InputBytes) > 0 && !c.InputTruncated {
-		return c.InputBytes, true
+// ValidatePublicURL validates an optional public base URL for crash report links,
+// requiring an http or https scheme with a host and no whitespace, control characters,
+// userinfo, query string, fragment, or Markdown delimiters.
+func ValidatePublicURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
 	}
-	if s.snapshot == nil && c.MinimizedInput != "" && c.MinimizedInput != "inline-failure" {
-		if data, err := os.ReadFile(c.MinimizedInput); err == nil && len(data) > 0 {
-			return data, true
+	for _, r := range raw {
+		if unicode.IsControl(r) || unicode.IsSpace(r) || strings.ContainsRune("()[]`<>\"'\\", r) {
+			return "", errors.New("public_url must not contain whitespace, control characters, or markdown delimiters")
 		}
 	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("public_url must be a valid http or https base URL")
+	}
+	return strings.TrimRight(u.Scheme+"://"+u.Host+u.EscapedPath(), "/"), nil
+}
+
+func (s *Server) resolveCrashInputBytes(c store.Crash) ([]byte, bool) {
 	if len(c.InputBytes) > 0 {
 		return c.InputBytes, true
 	}
+	if s.snapshot == nil && isSafeCorpusCrashPath(c.MinimizedInput) {
+		if data, err := os.ReadFile(c.MinimizedInput); err == nil && len(data) > 0 {
+			if len(data) > store.MaxCrashInputBytes {
+				data = data[:store.MaxCrashInputBytes]
+			}
+			return data, true
+		}
+	}
 	return nil, false
+}
+
+func isSafeCorpusCrashPath(p string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" || p == "inline-failure" {
+		return false
+	}
+	for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." {
+			return false
+		}
+	}
+	slashPath := strings.ReplaceAll(p, "\\", "/")
+	if !strings.Contains(slashPath, "/crashes/") && !strings.HasPrefix(slashPath, "crashes/") {
+		return false
+	}
+	info, err := os.Lstat(p)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func (s *Server) canServeCrashInput(c store.Crash) bool {
@@ -171,25 +209,20 @@ func (s *Server) handleCrashInput(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-func requestBaseURL(r *http.Request) string {
-	if pub := strings.TrimSpace(r.URL.Query().Get("public_url")); pub != "" {
-		return strings.TrimRight(pub, "/")
-	}
-	if r.Host == "" {
-		return ""
-	}
-	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		scheme = "https"
-	}
-	return scheme + "://" + r.Host
-}
-
 func (s *Server) handleCrashReport(w http.ResponseWriter, r *http.Request) {
 	crashID, err := parseCrashIDParam(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	baseURL := ""
+	if r.URL.Query().Has("public_url") {
+		validated, err := ValidatePublicURL(r.URL.Query().Get("public_url"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		baseURL = validated
 	}
 	c, err := s.store.GetCrash(r.Context(), crashID)
 	if err != nil {
@@ -206,7 +239,7 @@ func (s *Server) handleCrashReport(w http.ResponseWriter, r *http.Request) {
 	if canServeInput {
 		inputBytes, _ = s.resolveCrashInputBytes(c)
 	}
-	md := FormatCrashReportMarkdown(dto, inputBytes, requestBaseURL(r), canServeInput)
+	md := FormatCrashReportMarkdown(dto, inputBytes, baseURL, canServeInput)
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
@@ -256,7 +289,10 @@ func CrashStateLabel(c Crash) string {
 
 // FormatCrashReportMarkdown builds a shareable Markdown crash report for upstream maintainers.
 func FormatCrashReportMarkdown(c Crash, inputBytes []byte, baseURL string, allowInput bool) string {
-	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	base, err := ValidatePublicURL(baseURL)
+	if err != nil {
+		base = ""
+	}
 	permalink := fmt.Sprintf("/crashes/%d", c.ID)
 	inputURL := fmt.Sprintf("/api/crashes/%d/input", c.ID)
 	if base != "" {

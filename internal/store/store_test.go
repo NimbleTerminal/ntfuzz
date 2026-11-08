@@ -500,4 +500,99 @@ func TestCrashSharePersistenceTruncationAndV5Compatibility(t *testing.T) {
 	if _, err := st.GetCrash(ctx, 999999); err == nil {
 		t.Fatal("expected ErrNotFound for missing crash ID")
 	}
+
+	// Verify legacy dependency crash fingerprint migration & deduplication:
+	// Simulate a pre-v6 row whose stack_fingerprint was computed with LegacyFingerprintStack on the raw path.
+	rawDepStack := "panic: runtime error: slice bounds out of range [::-1]\ngithub.com/qmuntal/gltf.(*Decoder).decodeBuffer\n\t/var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:151"
+	scrubbedDepStack := "panic: runtime error: slice bounds out of range [::-1]\ngithub.com/qmuntal/gltf.(*Decoder).decodeBuffer\n\tgithub.com/qmuntal/gltf@v0.29.0/decoder.go:151"
+	oldFP := LegacyFingerprintStack(rawDepStack)
+	newFP := FingerprintStack(scrubbedDepStack)
+	if oldFP == newFP {
+		t.Fatalf("expected legacy and new fingerprints to differ on @v0.29.0 path")
+	}
+	legacyCrashID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            rawDepStack,
+		StackFingerprint: oldFP,
+		InputHash:        "legacy-input-hash-111",
+		MinimizedInput:   "legacy-path",
+	})
+	if err != nil {
+		t.Fatalf("RecordCrash legacy: %v", err)
+	}
+	// Recompute fingerprints as migration v6 does, then record a new input for the same scrubbed stack.
+	if err := st.recomputeCrashFingerprints(ctx); err != nil {
+		t.Fatalf("recomputeCrashFingerprints: %v", err)
+	}
+	dedupCrashID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            scrubbedDepStack,
+		StackFingerprint: newFP,
+		InputHash:        "new-input-hash-222",
+		MinimizedInput:   "new-path",
+	})
+	if err != nil {
+		t.Fatalf("RecordCrash after recompute: %v", err)
+	}
+	if dedupCrashID != legacyCrashID {
+		t.Fatalf("expected scrubbed dependency crash to deduplicate onto existing crash %d, got new ID %d", legacyCrashID, dedupCrashID)
+	}
+
+	// Verify PublishSnapshot strips input_bytes for projects with public_inputs = false while keeping public_inputs = true.
+	privPID, err := st.SyncProject(ctx, ProjectSyncInput{
+		Name:         "priv-proj",
+		Repo:         "https://github.com/example/priv",
+		PublicInputs: false,
+		SyncedAt:     &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	privTID, err := st.UpsertTarget(ctx, privPID, "example.com/priv", "FuzzPriv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	privCID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         privTID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            "panic: private",
+		StackFingerprint: "fp-priv",
+		InputHash:        "priv-hash-999",
+		MinimizedInput:   "priv-input",
+		InputBytes:       []byte("go test fuzz v1\n[]byte(\"secret\")\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapDir := t.TempDir()
+	snapMeta, err := st.PublishSnapshot(ctx, snapDir)
+	if err != nil {
+		t.Fatalf("PublishSnapshot: %v", err)
+	}
+	roStore, err := OpenReadOnly(filepath.Join(snapDir, snapMeta.File))
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer func() { _ = roStore.Close() }()
+
+	pubSnapCrash, err := roStore.GetCrash(ctx, cID)
+	if err != nil {
+		t.Fatalf("roStore.GetCrash(pub): %v", err)
+	}
+	if string(pubSnapCrash.InputBytes) != string(corpusBytes) {
+		t.Fatalf("expected public_inputs=true crash to retain InputBytes in snapshot, got %q", pubSnapCrash.InputBytes)
+	}
+	privSnapCrash, err := roStore.GetCrash(ctx, privCID)
+	if err != nil {
+		t.Fatalf("roStore.GetCrash(priv): %v", err)
+	}
+	if len(privSnapCrash.InputBytes) != 0 {
+		t.Fatalf("expected public_inputs=false crash to have InputBytes stripped in snapshot, got %q", privSnapCrash.InputBytes)
+	}
 }

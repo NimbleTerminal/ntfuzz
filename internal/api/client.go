@@ -113,7 +113,11 @@ func (c *Client) GetCrashReport(ctx context.Context, crashID int64, publicURL st
 		base = c.baseURL
 	}
 	if base != "" {
-		q.Set("public_url", base)
+		validated, err := ValidatePublicURL(base)
+		if err != nil {
+			return "", err
+		}
+		q.Set("public_url", validated)
 	}
 	raw, err := c.doBytes(ctx, http.MethodGet, path, q)
 	if err != nil {

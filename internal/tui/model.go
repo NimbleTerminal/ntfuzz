@@ -1373,8 +1373,8 @@ func (m Model) renderSparklineSummary() string {
 	return title + "\n" + subtleTextStyle.Render(statsLine) + "\n" + chartView + "\n" + axisLine
 }
 
-func (m Model) openCrashSplit(fallbackTotal int) (unreported, reported int) {
-	pf := m.currentProjectFilter()
+func (m Model) openCrashSplit(projectFilter string, fallbackTotal int) (unreported, reported int) {
+	pf := strings.TrimSpace(projectFilter)
 	for _, c := range m.openCrashes {
 		if c.FixedAt != nil {
 			continue
@@ -1388,7 +1388,7 @@ func (m Model) openCrashSplit(fallbackTotal int) (unreported, reported int) {
 			unreported++
 		}
 	}
-	if reported+unreported < fallbackTotal {
+	if (len(m.openCrashes) == 0 || pf == "") && reported+unreported < fallbackTotal {
 		unreported = fallbackTotal - reported
 	}
 	return unreported, reported
@@ -1396,7 +1396,7 @@ func (m Model) openCrashSplit(fallbackTotal int) (unreported, reported int) {
 
 func (m Model) renderCrashesView() string {
 	var b strings.Builder
-	unreported, reported := m.openCrashSplit(len(m.openCrashes))
+	unreported, reported := m.openCrashSplit("", len(m.openCrashes))
 	title := fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d: %d unreported, %d reported) — press 'enter' for target detail", len(m.openCrashes), unreported, reported)
 	if !m.readOnly {
 		title += ", 'x' to mark selected crash fixed"

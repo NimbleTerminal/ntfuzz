@@ -91,12 +91,6 @@ var (
 	reFailFuzz = regexp.MustCompile(`(?m)^--- FAIL: Fuzz\w+`)
 	// Go's own "nothing to run" diagnostics, anchored so target output cannot spoof them.
 	reMissingTarget = regexp.MustCompile(`(?m)^(?:testing: warning: no (?:fuzz )?tests to (?:fuzz|run)|\?\s+\S+\s+\[no test files\]|ok\s+\S+\s+[\d.]+s\s+\[no tests to run\])\s*$`)
-
-	reFileLine        = regexp.MustCompile(`(?m)([A-Za-z0-9_./\\@!~+-]+\.go):\d+(\s*\+0x[0-9a-fA-F]+)?`)
-	reHexAddr         = regexp.MustCompile(`0x[0-9a-fA-F]+`)
-	reGoroutine       = regexp.MustCompile(`goroutine \d+`)
-	reFailDuration    = regexp.MustCompile(`\([0-9.]+s\)`)
-	rePkgFailDuration = regexp.MustCompile(`(FAIL\t\S+\t)[0-9.]+s`)
 )
 
 // RunTarget executes `go test -fuzz` with GOMAXPROCS=1 and -parallel=1, copies any crash inputs into
@@ -199,9 +193,10 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 		rec.Stack = ScrubStack(rec.Stack, job.RepoDir, modulePath, goModCache)
 		rec.StackFingerprint = FingerprintStack(rec.Stack)
 		if rec.MinimizedInput != "" && rec.MinimizedInput != "inline-failure" {
-			srcPath := rec.MinimizedInput
-			if !filepath.IsAbs(srcPath) {
-				srcPath = filepath.Join(pkgDir, srcPath)
+			srcPath, ok := resolveSafeCrashInputPath(rec.MinimizedInput, pkgDir, job.RepoDir, absCorpusRoot)
+			if !ok {
+				rec.MinimizedInput = "inline-failure"
+				continue
 			}
 			if raw, readErr := os.ReadFile(srcPath); readErr == nil {
 				rec.InputBytes, rec.InputTruncated = CapCrashInput(raw)
@@ -399,27 +394,60 @@ func hasCoordinatorInfraFailure(output string) bool {
 // FingerprintStack normalizes a crash stack by stripping directory paths, line numbers,
 // test durations, hex pointers, and goroutine IDs so line shifts do not create duplicate crash rows.
 func FingerprintStack(stack string) string {
-	trimmed := strings.TrimSpace(stack)
-	if trimmed == "" {
-		return ""
+	return store.FingerprintStack(stack)
+}
+
+func resolveSafeCrashInputPath(rawPath, pkgDir, repoDir, corpusRoot string) (string, bool) {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" || rawPath == "inline-failure" {
+		return "", false
 	}
-	// Normalize duration and goroutine tokens before rewriting file:line and hex
-	// fragments. Those later passes can consume characters adjacent to a token
-	// (for example "+0xFA" swallowing the "FA" of an interleaved "FAIL\t" line),
-	// which would otherwise leave the duration intact and split fingerprints.
-	normalized := reFailDuration.ReplaceAllString(trimmed, "(0s)")
-	normalized = rePkgFailDuration.ReplaceAllString(normalized, "${1}0s")
-	normalized = reGoroutine.ReplaceAllString(normalized, "goroutine N")
-	normalized = reFileLine.ReplaceAllStringFunc(normalized, func(m string) string {
-		colon := strings.IndexByte(m, ':')
-		if colon < 0 {
-			return m
+	candidate := rawPath
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(pkgDir, candidate)
+	}
+	absPath, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Lstat(absPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	realPath := absPath
+	if eval, err := filepath.EvalSymlinks(absPath); err == nil {
+		realPath = eval
+	}
+	for _, root := range []string{pkgDir, repoDir, corpusRoot} {
+		if isPathWithinRoot(absPath, root) || isPathWithinRoot(realPath, root) {
+			return absPath, true
 		}
-		return filepath.Base(m[:colon])
-	})
-	normalized = reHexAddr.ReplaceAllString(normalized, "0xADDR")
-	sum := sha256.Sum256([]byte(normalized))
-	return hex.EncodeToString(sum[:12])
+	}
+	return "", false
+}
+
+func isPathWithinRoot(targetPath, root string) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
+	}
+	for _, candidateRoot := range []string{root, evalSymlinksOrSelf(root)} {
+		absRoot, err := filepath.Abs(candidateRoot)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(absRoot, targetPath)
+		if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func evalSymlinksOrSelf(p string) string {
+	if eval, err := filepath.EvalSymlinks(p); err == nil {
+		return eval
+	}
+	return p
 }
 
 func persistCrashInput(srcPath, crashStoreDir string, removeOriginal bool) (string, string, error) {

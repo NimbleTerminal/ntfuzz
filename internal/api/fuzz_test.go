@@ -89,7 +89,7 @@ func FuzzCrashShareEndpoints(f *testing.F) {
 			LastSeen:         time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
 			Stack:            "panic: bounds\ngithub.com/qmuntal/gltf@v0.29.0/decoder.go:151",
 			StackFingerprint: "aabbccddeeff001122334455",
-			InputHash:         sanitizeAttachmentFilename(idRaw, 1),
+			InputHash:        sanitizeAttachmentFilename(idRaw, 1),
 			BlamedModule:     "github.com/qmuntal/gltf",
 			BlamedVersion:    "v0.29.0",
 			BlamedFile:       "decoder.go",
