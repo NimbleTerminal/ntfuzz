@@ -1274,15 +1274,40 @@ func (m Model) renderDetailView() string {
 			if m.selectedCrashID != 0 && c.ID == m.selectedCrashID {
 				bullet = "▸"
 			}
-			fmt.Fprintf(&crashB, "%s [id:%d] %s  fp:%s  rev:%s  artifact: %s  (last seen %s)\n",
+			stateBadge := statusCrashStyle.Render("UNREPORTED")
+			if strings.TrimSpace(c.IssueURL) != "" {
+				stateBadge = statusWarnStyle.Render("REPORTED")
+			}
+			blameBadge := subtleTextStyle.Render("[PROJECT]")
+			if c.BlamedModule != "" {
+				dep := c.BlamedModule
+				if c.BlamedVersion != "" {
+					dep += "@" + c.BlamedVersion
+				}
+				blameBadge = statusWarnStyle.Render("[DEP: " + dep + "]")
+			}
+			fmt.Fprintf(&crashB, "%s [id:%d] %s %s %s  fp:%s  rev:%s  artifact: %s  (last seen %s)\n",
 				bullet,
 				c.ID,
+				stateBadge,
+				blameBadge,
 				statusCrashStyle.Render("hash:"+truncate(c.InputHash, 16)),
 				subtleTextStyle.Render(truncate(c.StackFingerprint, 12)),
 				subtleTextStyle.Render(formatRevision(c.GitSHA, c.Dirty)),
 				subtleTextStyle.Render(c.MinimizedInput),
 				formatRelativeTime(c.LastSeen),
 			)
+			if c.BlamedModule != "" && c.BlamedURL != "" {
+				loc := c.BlamedFile
+				if c.BlamedLine > 0 && loc != "" {
+					loc = fmt.Sprintf("%s:%d", loc, c.BlamedLine)
+				}
+				fmt.Fprintf(&crashB, "    Blame: %s (%s) -> %s\n", c.BlamedModule+"@"+c.BlamedVersion, loc, c.BlamedURL)
+			}
+			if strings.TrimSpace(c.IssueURL) != "" {
+				fmt.Fprintf(&crashB, "    Issue: %s\n", c.IssueURL)
+			}
+			fmt.Fprintf(&crashB, "    Permalink: /crashes/%d  •  Report: /api/crashes/%d/report.md\n", c.ID, c.ID)
 			if idx == 0 {
 				stackLines := strings.Split(strings.TrimSpace(c.Stack), "\n")
 				if len(stackLines) > 12 {
@@ -1348,9 +1373,31 @@ func (m Model) renderSparklineSummary() string {
 	return title + "\n" + subtleTextStyle.Render(statsLine) + "\n" + chartView + "\n" + axisLine
 }
 
+func (m Model) openCrashSplit(fallbackTotal int) (unreported, reported int) {
+	pf := m.currentProjectFilter()
+	for _, c := range m.openCrashes {
+		if c.FixedAt != nil {
+			continue
+		}
+		if pf != "" && c.ProjectName != pf {
+			continue
+		}
+		if strings.TrimSpace(c.IssueURL) != "" {
+			reported++
+		} else {
+			unreported++
+		}
+	}
+	if reported+unreported < fallbackTotal {
+		unreported = fallbackTotal - reported
+	}
+	return unreported, reported
+}
+
 func (m Model) renderCrashesView() string {
 	var b strings.Builder
-	title := fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d) — press 'enter' for target detail", len(m.openCrashes))
+	unreported, reported := m.openCrashSplit(len(m.openCrashes))
+	title := fmt.Sprintf("OPEN CRASHES ACROSS FLEET (%d: %d unreported, %d reported) — press 'enter' for target detail", len(m.openCrashes), unreported, reported)
 	if !m.readOnly {
 		title += ", 'x' to mark selected crash fixed"
 	}
@@ -1367,8 +1414,20 @@ func (m Model) renderCrashesView() string {
 		if i == m.crashIdx {
 			cursor = "▸ "
 		}
-		line := fmt.Sprintf("%s[id:%d] %s/%s@%s  hash:%s  fp:%s  seen:%s  input:%s",
-			cursor, c.ID, c.ProjectName, c.TargetName,
+		stateTag := "UNREPORTED"
+		if strings.TrimSpace(c.IssueURL) != "" {
+			stateTag = "REPORTED"
+		}
+		blameTag := "PROJECT"
+		if c.BlamedModule != "" {
+			dep := c.BlamedModule
+			if c.BlamedVersion != "" {
+				dep += "@" + c.BlamedVersion
+			}
+			blameTag = "DEP:" + dep
+		}
+		line := fmt.Sprintf("%s[id:%d] [%s] [%s] %s/%s@%s  hash:%s  fp:%s  seen:%s  input:%s",
+			cursor, c.ID, stateTag, blameTag, c.ProjectName, c.TargetName,
 			formatRevision(c.GitSHA, c.Dirty),
 			truncate(c.InputHash, 14),
 			truncate(c.StackFingerprint, 10),
@@ -1377,6 +1436,26 @@ func (m Model) renderCrashesView() string {
 		line = ansi.Truncate(line, contentWidth, "…")
 		if i == m.crashIdx {
 			b.WriteString(selectedRowStyle.Render(line) + "\n")
+			if c.BlamedModule != "" {
+				depLine := fmt.Sprintf("    Blame: %s@%s", c.BlamedModule, c.BlamedVersion)
+				if c.BlamedFile != "" {
+					if c.BlamedLine > 0 {
+						depLine += fmt.Sprintf(" (%s:%d)", c.BlamedFile, c.BlamedLine)
+					} else {
+						depLine += fmt.Sprintf(" (%s)", c.BlamedFile)
+					}
+				}
+				if c.BlamedURL != "" {
+					depLine += "  " + c.BlamedURL
+				}
+				b.WriteString(statusWarnStyle.Render(ansi.Truncate(depLine, contentWidth, "…")) + "\n")
+			}
+			if strings.TrimSpace(c.IssueURL) != "" {
+				issueLine := ansi.Truncate("    Issue: "+c.IssueURL, contentWidth, "…")
+				b.WriteString(statusWarnStyle.Render(issueLine) + "\n")
+			}
+			shareLine := ansi.Truncate(fmt.Sprintf("    Permalink: /crashes/%d  •  Report: /api/crashes/%d/report.md", c.ID, c.ID), contentWidth, "…")
+			b.WriteString(subtleTextStyle.Render(shareLine) + "\n")
 			stackPreview := ansi.Truncate("    Stack: "+crashSummaryLine(c.Stack), contentWidth, "…")
 			b.WriteString(subtleTextStyle.Render(stackPreview) + "\n")
 		} else {

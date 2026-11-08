@@ -76,10 +76,23 @@ func TestOpenAPIWireSchemas(t *testing.T) {
 	if err := json.Unmarshal(raw, &spec); err != nil {
 		t.Fatal(err)
 	}
-	if spec.OpenAPI != "3.0.3" || len(spec.Paths) != 8 {
+	if spec.OpenAPI != "3.0.3" || len(spec.Paths) != 12 {
 		t.Fatal("unexpected API document")
 	}
-	for _, path := range []string{"/api/projects", "/api/targets", "/api/runs", "/api/crashes", "/api/coverage/history", "/api/stats/{query}", "/api/status", "/api/crash-replays"} {
+	for _, path := range []string{
+		"/api/projects",
+		"/api/targets",
+		"/api/runs",
+		"/api/crashes",
+		"/api/crashes/{id}",
+		"/api/crashes/{id}/input",
+		"/api/crashes/{id}/report.md",
+		"/crashes/{id}",
+		"/api/coverage/history",
+		"/api/stats/{query}",
+		"/api/status",
+		"/api/crash-replays",
+	} {
 		if _, ok := spec.Paths[path]["get"]; !ok {
 			t.Errorf("missing GET %s", path)
 		}

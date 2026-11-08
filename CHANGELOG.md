@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Shareable upstream crash permalinks, reproducer downloads, and dependency attribution**:
+  - Per-crash JSON (`GET /api/crashes/{id}`) and server-rendered HTML permalinks (`GET /crashes/{id}`, zero JS required, with navigation to open the interactive Web Terminal Dashboard at `/`) in both `serve` and `view` modes.
+  - Self-contained reproducer storage in DuckDB (schema v6 `input_bytes` capped at 64 KiB with `input_truncated`, plus `public_inputs` on projects), served via `GET /api/crashes/{id}/input` as a `go test fuzz v1` attachment (`Content-Disposition: attachment; filename=<input_hash>`) when `public_inputs: true` is enabled on the project (and always in `serve` mode). Saved-crash replay now prefers stored `input_bytes` and falls back to the corpus file path on disk.
+  - Automatic stack path scrubbing (normalizing local `work_dir` repo prefixes to module paths and `GOMODCACHE` prefixes to `<module>@<version>/<file>:<line>` at record time while preserving GOROOT frames and `FingerprintStack` invariance) and top-down dependency blame attribution (`blamed_module`, `blamed_version`, `blamed_file`, `blamed_line`, and clickable GitHub/GitLab/pkg.go.dev `blamed_url`).
+  - Open-reported crash state via `POST /api/crashes/{id}/issue` and `ntfuzz crash link <id> --issue URL` (attaching an upstream issue/advisory URL to an open crash without marking it fixed), surfaced across the HTML permalink, `ntfuzz crash list`, TUI crashes/detail views, and burndown summary (`unreported` vs `reported`).
+  - Shareable Markdown crash reports via `GET /api/crashes/{id}/report.md` and `ntfuzz crash report <id> [--api URL] [--public-url URL]`.
+
 - **Crash burndown and Kitty charts**: record crash lifecycle events, chart the unresolved backlog with reconstructed-history labeling, and add an `i` toggle for ntcharts Kitty rendering in all graph views with per-session capability checks and text fallback.
 
 - **Revision and recovery tracking**: durable revision observations, a Revisions & Recovery graph/table, and saved-crash replay on changed revisions. Only an executed, passing reproducer closes an old crash; blocked checks retain it and recurrences reopen it. Schema v4 preserves existing data and labels current checkouts as baselines.

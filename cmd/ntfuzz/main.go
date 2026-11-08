@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -218,17 +219,34 @@ func newCrashCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			out := cmd.OutOrStdout()
 			if len(crashes) == 0 {
-				fmt.Println("No matching crashes.")
+				_, _ = fmt.Fprintln(out, "No matching crashes.")
 				return nil
 			}
 			for _, c := range crashes {
 				state := "OPEN"
 				if c.FixedAt != nil {
 					state = "FIXED (" + c.FixedAt.Local().Format(time.RFC3339) + ")"
+				} else if strings.TrimSpace(c.IssueURL) != "" {
+					state = "REPORTED"
 				}
-				fmt.Printf("[#%d] %s  %s/%s@%s  hash=%s  fp=%s  input=%s\n",
-					c.ID, state, c.ProjectName, c.TargetName, c.GitSHA, c.InputHash, c.StackFingerprint, c.MinimizedInput)
+				dep := "project"
+				if c.BlamedModule != "" {
+					dep = c.BlamedModule
+					if c.BlamedVersion != "" {
+						dep += "@" + c.BlamedVersion
+					}
+					if c.BlamedURL != "" {
+						dep += " (" + c.BlamedURL + ")"
+					}
+				}
+				extra := ""
+				if c.IssueURL != "" {
+					extra = "  issue=" + c.IssueURL
+				}
+				_, _ = fmt.Fprintf(out, "[#%d] %s  %s/%s@%s  blame=%s  hash=%s  fp=%s  input=%s%s\n",
+					c.ID, state, c.ProjectName, c.TargetName, c.GitSHA, dep, c.InputHash, c.StackFingerprint, c.MinimizedInput, extra)
 			}
 			return nil
 		},
@@ -249,12 +267,56 @@ func newCrashCmd() *cobra.Command {
 			if err := client.MarkCrashFixed(cmd.Context(), crashID, issueURL); err != nil {
 				return err
 			}
-			fmt.Printf("Marked crash #%d as fixed.\n", crashID)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Marked crash #%d as fixed.\n", crashID)
 			return nil
 		},
 	}
 	fixedCmd.Flags().StringVar(&issueURL, "issue", "", "Optional issue URL to attach to the crash record")
 
-	crashCmd.AddCommand(listCmd, fixedCmd)
+	var linkIssueURL string
+	linkCmd := &cobra.Command{
+		Use:   "link <crash-id>",
+		Short: "Attach an upstream issue URL to an open crash without marking it fixed",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			crashID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil || crashID <= 0 {
+				return fmt.Errorf("invalid crash ID %q", args[0])
+			}
+			if strings.TrimSpace(linkIssueURL) == "" {
+				return fmt.Errorf("--issue URL is required")
+			}
+			client := api.NewClient(apiURL)
+			if err := client.SetCrashIssue(cmd.Context(), crashID, linkIssueURL); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Linked crash #%d to %s.\n", crashID, strings.TrimSpace(linkIssueURL))
+			return nil
+		},
+	}
+	linkCmd.Flags().StringVar(&linkIssueURL, "issue", "", "Upstream issue or security advisory URL")
+
+	var publicURL string
+	reportCmd := &cobra.Command{
+		Use:   "report <crash-id>",
+		Short: "Print a shareable Markdown crash report for upstream maintainers",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			crashID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil || crashID <= 0 {
+				return fmt.Errorf("invalid crash ID %q", args[0])
+			}
+			client := api.NewClient(apiURL)
+			md, err := client.GetCrashReport(cmd.Context(), crashID, publicURL)
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), md)
+			return nil
+		},
+	}
+	reportCmd.Flags().StringVar(&publicURL, "public-url", "", "Public base URL for permalink and input download links (defaults to --api)")
+
+	crashCmd.AddCommand(listCmd, fixedCmd, linkCmd, reportCmd)
 	return crashCmd
 }

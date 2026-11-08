@@ -181,5 +181,44 @@ func FuzzFingerprintStack(f *testing.F) {
 		if fpShift := FingerprintStack(shifted); fpShift != fp1 {
 			t.Fatalf("fingerprint changed across goroutine/duration normalization: %q vs %q", fp1, fpShift)
 		}
+
+		// ScrubStack must preserve FingerprintStack invariance.
+		scrubbed := ScrubStack(stack, "/var/lib/ntfuzz/.ntfuzz/repos/nt3d", "nimbleterminal.dev/nt3d", "/var/lib/ntfuzz/.cache/go-mod")
+		if fpScrubbed := FingerprintStack(scrubbed); fpScrubbed != fp1 {
+			t.Fatalf("fingerprint changed after ScrubStack: %q vs %q (scrubbed=%q)", fp1, fpScrubbed, scrubbed)
+		}
+	})
+}
+
+func FuzzAttributeAndScrubStack(f *testing.F) {
+	f.Add(
+		"panic: runtime error: slice bounds out of range [::-1]\ngithub.com/qmuntal/gltf.(*Decoder).decodeBuffer\n    /var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:151\nnimbleterminal.dev/nt3d/mesh/gltf.Decode\n    /var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf.go:108\n",
+		"/var/lib/ntfuzz/.ntfuzz/repos/nt3d",
+		"nimbleterminal.dev/nt3d",
+		"/var/lib/ntfuzz/.cache/go-mod",
+	)
+	f.Add(
+		"panic: local bug\nnimbleterminal.dev/nt3d/mesh/gltf.Decode\n\t/var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf.go:42\n",
+		"/var/lib/ntfuzz/.ntfuzz/repos/nt3d",
+		"nimbleterminal.dev/nt3d",
+		"/var/lib/ntfuzz/.cache/go-mod",
+	)
+	f.Add("", "", "", "")
+
+	f.Fuzz(func(t *testing.T, stack, repoDir, modulePath, goModCache string) {
+		if len(stack)+len(repoDir)+len(modulePath)+len(goModCache) > 32*1024 {
+			return
+		}
+		scrubbed := ScrubStack(stack, repoDir, modulePath, goModCache)
+		if FingerprintStack(scrubbed) != FingerprintStack(stack) {
+			t.Fatalf("FingerprintStack mismatch after ScrubStack")
+		}
+		attr := AttributeStack(stack, repoDir, modulePath)
+		if attr.Module != "" {
+			u := DependencySourceURL(attr.Module, attr.Version, attr.File, attr.Line)
+			if !strings.HasPrefix(u, "https://") {
+				t.Fatalf("DependencySourceURL returned non-https URL %q for %+v", u, attr)
+			}
+		}
 	})
 }

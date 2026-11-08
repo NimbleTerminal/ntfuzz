@@ -135,26 +135,28 @@ func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {
 			)
 			// Record the sync error visibly WITHOUT advancing last_synced
 			_, _ = o.store.SyncProject(ctx, store.ProjectSyncInput{
-				Name:      proj.Name,
-				Repo:      proj.Repo,
-				Branch:    proj.Branch,
-				GitSHA:    checkout.GitSHA,
-				Dirty:     checkout.Dirty,
-				SyncedAt:  nil,
-				SyncError: err.Error(),
+				Name:         proj.Name,
+				Repo:         proj.Repo,
+				Branch:       proj.Branch,
+				GitSHA:       checkout.GitSHA,
+				Dirty:        checkout.Dirty,
+				SyncedAt:     nil,
+				SyncError:    err.Error(),
+				PublicInputs: proj.PublicInputs,
 			})
 			continue
 		}
 
 		now := time.Now().UTC()
 		projID, err := o.store.SyncProject(ctx, store.ProjectSyncInput{
-			Name:      proj.Name,
-			Repo:      proj.Repo,
-			Branch:    proj.Branch,
-			GitSHA:    checkout.GitSHA,
-			Dirty:     checkout.Dirty,
-			SyncedAt:  &now,
-			SyncError: "",
+			Name:         proj.Name,
+			Repo:         proj.Repo,
+			Branch:       proj.Branch,
+			GitSHA:       checkout.GitSHA,
+			Dirty:        checkout.Dirty,
+			SyncedAt:     &now,
+			SyncError:    "",
+			PublicInputs: proj.PublicInputs,
 		})
 		if err != nil {
 			o.logger.Error("store sync project failed",
@@ -489,6 +491,9 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 		)
 	}
 
+	modulePath := deriveModulePath(moduleDir, job.PkgImport, job.PkgRelDir)
+	goModCache := os.Getenv("GOMODCACHE")
+
 	for _, crash := range res.CrashRecords {
 		minInput := crash.MinimizedInput
 		if minInput != "" && minInput != "inline-failure" && !filepath.IsAbs(minInput) {
@@ -498,17 +503,46 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 			}
 			minInput = filepath.Join(pkgDir, minInput)
 		}
+		blamedMod := crash.BlamedModule
+		blamedVer := crash.BlamedVersion
+		blamedFile := crash.BlamedFile
+		blamedLine := crash.BlamedLine
+		if blamedMod == "" {
+			attr := AttributeStack(crash.Stack, moduleDir, modulePath)
+			blamedMod = attr.Module
+			blamedVer = attr.Version
+			blamedFile = attr.File
+			blamedLine = attr.Line
+		}
+		scrubbedStack := ScrubStack(crash.Stack, moduleDir, modulePath, goModCache)
+		fp := crash.StackFingerprint
+		if fp == "" {
+			fp = FingerprintStack(scrubbedStack)
+		}
+		inputBytes := crash.InputBytes
+		inputTrunc := crash.InputTruncated
+		if len(inputBytes) == 0 && minInput != "" && minInput != "inline-failure" {
+			if raw, readErr := os.ReadFile(minInput); readErr == nil {
+				inputBytes, inputTrunc = CapCrashInput(raw)
+			}
+		}
 		_, crashErr := o.store.RecordCrash(ctx, store.Crash{
 			TargetID:         item.targetID,
 			FirstSeen:        res.Started,
 			LastSeen:         time.Now().UTC(),
-			Stack:            crash.Stack,
-			StackFingerprint: crash.StackFingerprint,
+			Stack:            scrubbedStack,
+			StackFingerprint: fp,
 			InputHash:        crash.InputHash,
 			MinimizedInput:   minInput,
+			InputBytes:       inputBytes,
+			InputTruncated:   inputTrunc,
 			GitSHA:           item.checkout.GitSHA,
 			Dirty:            item.checkout.Dirty,
 			GoVersion:        item.checkout.GoVersion,
+			BlamedModule:     blamedMod,
+			BlamedVersion:    blamedVer,
+			BlamedFile:       blamedFile,
+			BlamedLine:       blamedLine,
 		})
 		if crashErr != nil {
 			o.logger.Error("record crash failed",

@@ -68,3 +68,58 @@ func FuzzParseOpenParamAndFixRequest(f *testing.F) {
 		}
 	})
 }
+
+func FuzzCrashShareEndpoints(f *testing.F) {
+	f.Add("1", `{"issue_url":"https://github.com/qmuntal/gltf/issues/1"}`, []byte("go test fuzz v1\n[]byte(\"abc\")\n"), true)
+	f.Add("999", `{"issue_url":"javascript:alert(1)"}`, []byte(""), false)
+	f.Add("bad-id", `invalid`, []byte("go test fuzz v1\nstring(\"x\")\n"), true)
+
+	f.Fuzz(func(t *testing.T, idRaw, issueBody string, corpus []byte, publicInputs bool) {
+		if len(idRaw)+len(issueBody)+len(corpus) > 4096 {
+			return
+		}
+		dto := Crash{
+			ID:               1,
+			TargetID:         2,
+			ProjectName:      "nt3d",
+			Package:          "nimbleterminal.dev/nt3d/mesh/gltf",
+			TargetName:       "FuzzDecode",
+			PublicInputs:     publicInputs,
+			FirstSeen:        time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
+			LastSeen:         time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
+			Stack:            "panic: bounds\ngithub.com/qmuntal/gltf@v0.29.0/decoder.go:151",
+			StackFingerprint: "aabbccddeeff001122334455",
+			InputHash:         sanitizeAttachmentFilename(idRaw, 1),
+			BlamedModule:     "github.com/qmuntal/gltf",
+			BlamedVersion:    "v0.29.0",
+			BlamedFile:       "decoder.go",
+			BlamedLine:       151,
+			BlamedURL:        "https://github.com/qmuntal/gltf/blob/v0.29.0/decoder.go#L151",
+		}
+
+		htmlPage := renderCrashHTMLPage(dto, corpus, len(corpus) > 0, publicInputs, !publicInputs)
+		if !strings.Contains(htmlPage, "<!doctype html>") || !strings.Contains(htmlPage, `href="/"`) {
+			t.Fatalf("unexpected HTML page output")
+		}
+		md := FormatCrashReportMarkdown(dto, corpus, "https://fuzz.nimbleterminal.com", publicInputs)
+		if !strings.Contains(md, "# Crash #1:") {
+			t.Fatalf("unexpected Markdown report output")
+		}
+
+		// Snapshot server must never allow POST /api/crashes/{id}/issue.
+		snapSrv := NewSnapshotServer(nil, store.Snapshot{
+			File:          "snapshot-1.duckdb",
+			PublishedAt:   time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
+			SchemaVersion: store.CurrentSchemaVersion,
+		})
+		escapedID := url.PathEscape(idRaw)
+		if escapedID != "" && !strings.Contains(escapedID, "/") {
+			req := httptest.NewRequest(http.MethodPost, "/api/crashes/"+escapedID+"/issue", strings.NewReader(issueBody))
+			rec := httptest.NewRecorder()
+			snapSrv.ServeHTTP(rec, req)
+			if rec.Code == http.StatusOK {
+				t.Fatalf("snapshot server allowed POST /api/crashes/%s/issue", escapedID)
+			}
+		}
+	})
+}

@@ -23,11 +23,12 @@ type Config struct {
 
 // ProjectConfig defines a single repository/module to fuzz.
 type ProjectConfig struct {
-	Name      string `yaml:"name"`
-	Repo      string `yaml:"repo"`
-	Branch    string `yaml:"branch,omitempty"`
-	FuzzTime  string `yaml:"fuzztime,omitempty"`
-	CorpusDir string `yaml:"corpus_dir,omitempty"`
+	Name         string `yaml:"name"`
+	Repo         string `yaml:"repo"`
+	Branch       string `yaml:"branch,omitempty"`
+	FuzzTime     string `yaml:"fuzztime,omitempty"`
+	CorpusDir    string `yaml:"corpus_dir,omitempty"`
+	PublicInputs bool   `yaml:"public_inputs,omitempty"`
 }
 
 // EffectiveFuzzTime returns the configured fuzz duration for a project,

@@ -9,11 +9,13 @@ projects:
     repo: ./examples/demo-parser
     fuzztime: 6s
     corpus_dir: .ntfuzz/corpus/demo-parser
+    public_inputs: true
 
   - name: demo-codec
     repo: ./examples/demo-codec
     fuzztime: 6s
     corpus_dir: .ntfuzz/corpus/demo-codec
+    public_inputs: true
 
   # Example remote Git repositories with native Go fuzz targets:
   # - name: go-yaml

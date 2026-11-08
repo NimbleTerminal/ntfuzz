@@ -27,7 +27,7 @@ func OpenReadOnly(path string) (*Store, error) {
 	}
 	s := &Store{readonly: db}
 	version, err := s.SchemaVersion(context.Background())
-	if err != nil || version != CurrentSchemaVersion {
+	if err != nil || version < 5 || version > CurrentSchemaVersion {
 		_ = db.Close()
 		return nil, fmt.Errorf("snapshot schema %d (need %d): %v", version, CurrentSchemaVersion, err)
 	}
@@ -208,6 +208,12 @@ func bindReadSQL(query string, args []any) (string, error) {
 			fmt.Fprint(&b, v)
 		case int64:
 			fmt.Fprint(&b, v)
+		case bool:
+			if v {
+				b.WriteString("TRUE")
+			} else {
+				b.WriteString("FALSE")
+			}
 		case time.Time:
 			b.WriteString("TIMESTAMP " + sqlLiteral(v.UTC().Format("2006-01-02 15:04:05.999999999")))
 		default:

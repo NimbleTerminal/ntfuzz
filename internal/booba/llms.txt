@@ -7,22 +7,25 @@ All URLs below are relative to this dashboard's origin. GET requests need no req
 ## Investigate a crash
 
 1. GET /api/status. Check read_only and snapshot_at. A snapshot is historical data, not live worker activity; updated_at also equals its publication time. Report snapshot_at when describing freshness. Live mode uses updated_at for response time.
-2. GET /api/crashes?open=true. Match project_name, package, and target_name (exact spelling). An empty array means no matching open crashes in this data, not proof that a target is bug-free.
-3. Read stack, first_seen, last_seen, git_sha, dirty, go_version, input_hash, and stack_fingerprint. fixed_at is omitted for open crashes. git_sha identifies the tested revision, which may differ from a local checkout.
-4. Use the crash's numeric target_id in GET /api/runs?target=8&limit=2 (replace 8 with the actual ID). Review status and diagnostic for recent execution evidence. A historical crash need not have occurred in the latest run.
-5. For a target without an open crash, GET /api/targets?project=PROJECT_NAME and match name and package; use its id. URL-encode parameter values. Numeric IDs avoid ambiguity across packages/projects.
+2. GET /api/crashes?open=true (or GET /api/crashes/{id} for a single crash). Match project_name, package, and target_name (exact spelling). An empty array means no matching open crashes in this data, not proof that a target is bug-free.
+3. Read stack, first_seen, last_seen, git_sha, dirty, go_version, input_hash, stack_fingerprint, issue_url, blamed_module, blamed_version, blamed_file, blamed_line, blamed_url, and replay_status. fixed_at is omitted for open crashes; issue_url on an open crash means it has been reported upstream.
+4. Open GET /crashes/{id} for a server-rendered HTML permalink, or GET /api/crashes/{id}/report.md for a Markdown advisory report with reproduction instructions.
+5. Download the Go fuzz corpus reproducer file from GET /api/crashes/{id}/input when public_inputs is true on the project (always available in serve mode; returns HTTP 403 in snapshot view mode when public_inputs is false). Place the file in testdata/fuzz/FuzzX/<input_hash> and run `go test ./<pkg> -run 'FuzzX/<input_hash>'`.
+6. Use the crash's numeric target_id in GET /api/runs?target=8&limit=2 (replace 8 with the actual ID). Review status and diagnostic for recent execution evidence. A historical crash need not have occurred in the latest run.
+7. For a target without an open crash, GET /api/targets?project=PROJECT_NAME and match name and package; use its id. URL-encode parameter values. Numeric IDs avoid ambiguity across packages/projects.
 
-minimized_input is a server-local corpus file path, not a download URL or input bytes. This API does not provide corpus downloads. Stack traces may contain server-local paths as well. Obtain the corpus from the operator if reproducing the exact input is necessary.
+minimized_input records the server-local corpus file path; use GET /api/crashes/{id}/input to download the corpus bytes when the project opts in via `public_inputs: true` (or on a live serve instance). Newly recorded stacks scrub local checkout and GOMODCACHE prefixes to module paths.
 
 ## Read endpoints
 
 - [Status](/api/status): fleet summary, read_only, and snapshot_at when applicable.
-- [Projects](/api/projects): project IDs, names, revisions, and sync status.
+- [Projects](/api/projects): project IDs, names, revisions, public_inputs, and sync status.
 - [Targets](/api/targets): active targets; optional project filter accepts project ID or name.
 - [Open crashes](/api/crashes?open=true): defaults to open only; open=false or open=all includes fixed crashes. Optional target filter.
+- Per-crash endpoints: `/api/crashes/{id}` (JSON), `/crashes/{id}` (server-rendered HTML permalink), `/api/crashes/{id}/report.md` (Markdown report), and `/api/crashes/{id}/input` (Go corpus file download).
 - [Runs](/api/runs?limit=2): most recent first; optional target filter; limit defaults to 100.
 - [Coverage history](/api/coverage/history?target=8&limit=50): replace example target ID; chronological series of the most recent points, default limit 50. Missing target returns an empty array.
-- [Time-series stats](/api/stats/throughput?window=24h): canned time-bucketed queries (`throughput`, `coverage`, `outcomes`) over windows (`1h`, `6h`, `24h`, `7d`, `14d`) with optional `project` and `target` filters.
+- [Time-series stats](/api/stats/throughput?window=24h): canned time-bucketed queries (`throughput`, `coverage`, `outcomes`, `revisions`, `burndown`) over windows (`1h`, `6h`, `24h`, `7d`, `14d`) with optional `project` and `target` filters.
 
 Target filters accept numeric ID, target name, or project-qualified target name (project/name). Prefer IDs. Positive integer limits are supported; missing or invalid limits use the default. List responses are JSON arrays; failures return an error string in a JSON object. open accepts true/1, false/0/all; invalid values return HTTP 400.
 
@@ -31,7 +34,7 @@ Target filters accept numeric ID, target name, or project-qualified target name 
 - [API documentation](/api/docs): browser-readable usage guide.
 - [OpenAPI description](/openapi.json): schemas and parameters for the read API.
 
-Public snapshot viewers expose no mutation endpoint. Private live servers also support POST /api/crashes/{id}/fix; marking a crash fixed changes stored state and is not needed to investigate it. This read API description does not advertise that operator action as a read operation.
+Public snapshot viewers expose no mutation endpoint. Private live servers also support POST /api/crashes/{id}/issue (to link an upstream issue URL to an open crash) and POST /api/crashes/{id}/fix; those operator mutations change stored state and are not needed to investigate a crash.
 
 Revision/recovery tracking: GET /api/stats/revisions?window=24h; GET /api/crash-replays for saved-input checks. Baselines are not new commits; replay pass means the saved input no longer reproduces.
 

@@ -207,6 +207,210 @@
         }
       }
     },
+    "/api/crashes/{id}": {
+      "get": {
+        "summary": "Get a single crash record by ID",
+        "operationId": "getCrashById",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Positive integer crash ID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Crash"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid crash ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Crash not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/crashes/{id}/input": {
+      "get": {
+        "summary": "Download the Go fuzz corpus reproducer file for a crash",
+        "operationId": "getCrashInput",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Positive integer crash ID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Go fuzz v1 corpus file attachment",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Public input download is not enabled for this project in snapshot view mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Crash or stored input bytes not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/crashes/{id}/report.md": {
+      "get": {
+        "summary": "Render a shareable Markdown crash report for upstream maintainers",
+        "operationId": "getCrashReportMarkdown",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Positive integer crash ID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "public_url",
+            "in": "query",
+            "description": "Optional base URL override for permalink and input links in the rendered Markdown.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Markdown crash report",
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Crash not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/crashes/{id}": {
+      "get": {
+        "summary": "Server-rendered HTML crash permalink (no JavaScript required)",
+        "operationId": "getCrashHTML",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Positive integer crash ID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-rendered HTML crash page",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Crash not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/coverage/history": {
       "get": {
         "summary": "Recent coverage points in chronological order; empty array without target",
@@ -427,6 +631,10 @@
           "dirty": {
             "type": "boolean"
           },
+          "public_inputs": {
+            "type": "boolean",
+            "description": "Whether public snapshot viewers may serve GET /api/crashes/{id}/input for crashes in this project."
+          },
           "sync_error": {
             "type": "string"
           },
@@ -467,6 +675,7 @@
           "name",
           "repo",
           "dirty",
+          "public_inputs",
           "target_count",
           "total_runs",
           "open_crashes",
@@ -690,6 +899,10 @@
           "target_name": {
             "type": "string"
           },
+          "public_inputs": {
+            "type": "boolean",
+            "description": "Whether the project allows public corpus input downloads in snapshot view mode."
+          },
           "first_seen": {
             "type": "string",
             "format": "date-time"
@@ -713,7 +926,11 @@
           },
           "minimized_input": {
             "type": "string",
-            "description": "Server-local corpus path, not a download URL. Input bytes are not exposed by this API."
+            "description": "Server-local corpus path. Use GET /api/crashes/{id}/input to download the corpus file when public_inputs is enabled (or in serve mode)."
+          },
+          "input_truncated": {
+            "type": "boolean",
+            "description": "True if the stored input exceeded the 64 KiB database cap."
           },
           "issue_url": {
             "type": "string"
@@ -726,16 +943,47 @@
           },
           "go_version": {
             "type": "string"
+          },
+          "blamed_module": {
+            "type": "string"
+          },
+          "blamed_version": {
+            "type": "string"
+          },
+          "blamed_file": {
+            "type": "string"
+          },
+          "blamed_line": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "blamed_url": {
+            "type": "string"
+          },
+          "replay_status": {
+            "type": "string"
+          },
+          "replay_git_sha": {
+            "type": "string"
+          },
+          "replay_checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "replay_diagnostic": {
+            "type": "string"
           }
         },
         "required": [
           "id",
           "target_id",
+          "public_inputs",
           "first_seen",
           "last_seen",
           "stack",
           "input_hash",
           "minimized_input",
+          "input_truncated",
           "issue_url",
           "dirty"
         ]

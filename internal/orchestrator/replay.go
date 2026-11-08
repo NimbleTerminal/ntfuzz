@@ -22,9 +22,15 @@ func replayCrash(ctx context.Context, job JobSpec, c store.Crash) (outcome, diag
 	blocked := func(err error) (string, string) {
 		return "blocked", sanitizeDiagnostic(err.Error(), job.RepoDir, job.CorpusDir)
 	}
-	data, err := os.ReadFile(c.MinimizedInput)
-	if err != nil {
-		return blocked(fmt.Errorf("saved input unavailable: %w", err))
+	var data []byte
+	var err error
+	if len(c.InputBytes) > 0 && !c.InputTruncated {
+		data = c.InputBytes
+	} else {
+		data, err = os.ReadFile(c.MinimizedInput)
+		if err != nil {
+			return blocked(fmt.Errorf("saved input unavailable: %w", err))
+		}
 	}
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:16]) != c.InputHash {

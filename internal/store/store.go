@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,10 @@ import (
 )
 
 // CurrentSchemaVersion tracks the DuckDB schema version.
-const CurrentSchemaVersion = 5
+const CurrentSchemaVersion = 6
+
+// MaxCrashInputBytes caps minimized input bytes stored directly in DuckDB (64 KiB).
+const MaxCrashInputBytes = 64 * 1024
 
 // ErrNotFound is returned when a requested record does not exist.
 var ErrNotFound = errors.New("record not found")
@@ -31,13 +35,14 @@ type Store struct {
 
 // ProjectSyncInput carries repository checkout metadata when syncing a project.
 type ProjectSyncInput struct {
-	Name      string
-	Repo      string
-	Branch    string
-	GitSHA    string
-	Dirty     bool
-	SyncedAt  *time.Time
-	SyncError string
+	Name         string
+	Repo         string
+	Branch       string
+	GitSHA       string
+	Dirty        bool
+	SyncedAt     *time.Time
+	SyncError    string
+	PublicInputs bool
 }
 
 // TargetKey identifies a discovered target within a project.
@@ -54,6 +59,7 @@ type Project struct {
 	Branch         string     `json:"branch,omitempty"`
 	GitSHA         string     `json:"git_sha,omitempty"`
 	Dirty          bool       `json:"dirty"`
+	PublicInputs   bool       `json:"public_inputs"`
 	SyncError      string     `json:"sync_error,omitempty"`
 	LastSynced     *time.Time `json:"last_synced,omitempty"`
 	TargetCount    int        `json:"target_count"`
@@ -122,6 +128,7 @@ type Crash struct {
 	ProjectName      string     `json:"project_name,omitempty"`
 	Package          string     `json:"package,omitempty"`
 	TargetName       string     `json:"target_name,omitempty"`
+	PublicInputs     bool       `json:"public_inputs"`
 	FirstSeen        time.Time  `json:"first_seen"`
 	LastSeen         time.Time  `json:"last_seen"`
 	FixedAt          *time.Time `json:"fixed_at,omitempty"`
@@ -129,10 +136,20 @@ type Crash struct {
 	StackFingerprint string     `json:"stack_fingerprint,omitempty"`
 	InputHash        string     `json:"input_hash"`
 	MinimizedInput   string     `json:"minimized_input"`
+	InputBytes       []byte     `json:"-"`
+	InputTruncated   bool       `json:"input_truncated"`
 	IssueURL         string     `json:"issue_url"`
 	GitSHA           string     `json:"git_sha,omitempty"`
 	Dirty            bool       `json:"dirty"`
 	GoVersion        string     `json:"go_version,omitempty"`
+	BlamedModule     string     `json:"blamed_module,omitempty"`
+	BlamedVersion    string     `json:"blamed_version,omitempty"`
+	BlamedFile       string     `json:"blamed_file,omitempty"`
+	BlamedLine       int        `json:"blamed_line,omitempty"`
+	ReplayStatus     string     `json:"replay_status,omitempty"`
+	ReplayGitSHA     string     `json:"replay_git_sha,omitempty"`
+	ReplayCheckedAt  *time.Time `json:"replay_checked_at,omitempty"`
+	ReplayDiagnostic string     `json:"replay_diagnostic,omitempty"`
 }
 
 // CoveragePoint represents a point in a target's coverage and corpus history.
@@ -298,8 +315,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	currentVersion, err := s.schemaVersionLocked(ctx)
-	if err != nil {
+	if _, err := s.schemaVersionLocked(ctx); err != nil {
 		return fmt.Errorf("check schema version: %w", err)
 	}
 
@@ -398,8 +414,32 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}})
 
 	migrations = append(migrations, migration{version: 5, stmts: []string{crashEventSchema}})
+	migrations = append(migrations, migration{
+		version: 6,
+		stmts: []string{
+			`ALTER TABLE projects ADD COLUMN IF NOT EXISTS public_inputs BOOLEAN DEFAULT FALSE;`,
+			`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS input_bytes BLOB;`,
+			`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS input_truncated BOOLEAN DEFAULT FALSE;`,
+			`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS blamed_module VARCHAR DEFAULT '';`,
+			`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS blamed_version VARCHAR DEFAULT '';`,
+			`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS blamed_file VARCHAR DEFAULT '';`,
+			`ALTER TABLE crashes ADD COLUMN IF NOT EXISTS blamed_line INTEGER DEFAULT 0;`,
+		},
+	})
+
+	applied := map[int]bool{}
+	if vRows, qErr := s.db.QueryContext(ctx, `SELECT version FROM schema_migrations`); qErr == nil {
+		for vRows.Next() {
+			var v int
+			if vRows.Scan(&v) == nil {
+				applied[v] = true
+			}
+		}
+		_ = vRows.Close()
+	}
+
 	for _, m := range migrations {
-		if m.version <= currentVersion {
+		if applied[m.version] {
 			continue
 		}
 		for _, stmt := range m.stmts {
@@ -522,9 +562,9 @@ func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, er
 			syncArg = in.SyncedAt.UTC()
 		}
 		err = s.db.QueryRowContext(ctx,
-			`INSERT INTO projects (name, repo, branch, last_synced, git_sha, dirty, sync_error)
-			 VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-			in.Name, in.Repo, in.Branch, syncArg, in.GitSHA, in.Dirty, in.SyncError,
+			`INSERT INTO projects (name, repo, branch, last_synced, git_sha, dirty, sync_error, public_inputs)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+			in.Name, in.Repo, in.Branch, syncArg, in.GitSHA, in.Dirty, in.SyncError, in.PublicInputs,
 		).Scan(&id)
 		if err != nil {
 			return 0, fmt.Errorf("insert project %q: %w", in.Name, err)
@@ -538,9 +578,9 @@ func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, er
 	if in.SyncedAt != nil {
 		_, err = s.db.ExecContext(ctx,
 			`UPDATE projects
-			 SET repo = ?, branch = ?, last_synced = ?, git_sha = ?, dirty = ?, sync_error = ?
+			 SET repo = ?, branch = ?, last_synced = ?, git_sha = ?, dirty = ?, sync_error = ?, public_inputs = ?
 			 WHERE id = ?`,
-			in.Repo, in.Branch, in.SyncedAt.UTC(), in.GitSHA, in.Dirty, in.SyncError, id,
+			in.Repo, in.Branch, in.SyncedAt.UTC(), in.GitSHA, in.Dirty, in.SyncError, in.PublicInputs, id,
 		)
 	} else {
 		// Preserve existing last_synced and git_sha if not provided on a failed pull
@@ -549,9 +589,10 @@ func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, er
 			 SET repo = ?, branch = ?,
 			     git_sha = CASE WHEN ? != '' THEN ? ELSE git_sha END,
 			     dirty = CASE WHEN ? != '' THEN ? ELSE dirty END,
-			     sync_error = ?
+			     sync_error = ?,
+			     public_inputs = ?
 			 WHERE id = ?`,
-			in.Repo, in.Branch, in.GitSHA, in.GitSHA, in.GitSHA, in.Dirty, in.SyncError, id,
+			in.Repo, in.Branch, in.GitSHA, in.GitSHA, in.GitSHA, in.Dirty, in.SyncError, in.PublicInputs, id,
 		)
 	}
 	if err != nil {
@@ -697,6 +738,14 @@ func (s *Store) InsertRun(ctx context.Context, r Run) (int64, error) {
 	return id, tx.Commit()
 }
 
+func sanitizeUTF8(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if strings.IndexByte(s, 0) >= 0 {
+		s = strings.ReplaceAll(s, "\x00", "\uFFFD")
+	}
+	return s
+}
+
 // RecordCrash inserts a new crash or updates last_seen if the same (target_id, input_hash)
 // or (target_id, stack_fingerprint) already exists.
 func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
@@ -705,6 +754,17 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	c.Stack = sanitizeUTF8(c.Stack)
+	c.StackFingerprint = sanitizeUTF8(c.StackFingerprint)
+	c.InputHash = sanitizeUTF8(c.InputHash)
+	c.MinimizedInput = sanitizeUTF8(c.MinimizedInput)
+	c.IssueURL = sanitizeUTF8(c.IssueURL)
+	c.GitSHA = sanitizeUTF8(c.GitSHA)
+	c.GoVersion = sanitizeUTF8(c.GoVersion)
+	c.BlamedModule = sanitizeUTF8(c.BlamedModule)
+	c.BlamedVersion = sanitizeUTF8(c.BlamedVersion)
+	c.BlamedFile = sanitizeUTF8(c.BlamedFile)
 
 	now := time.Now().UTC()
 	firstSeen := c.FirstSeen
@@ -719,6 +779,14 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 	} else {
 		lastSeen = lastSeen.UTC()
 	}
+
+	inputBytes := c.InputBytes
+	inputTruncated := c.InputTruncated
+	if len(inputBytes) > MaxCrashInputBytes {
+		inputBytes = inputBytes[:MaxCrashInputBytes]
+		inputTruncated = true
+	}
+	inputHex := hex.EncodeToString(inputBytes)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -738,10 +806,19 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 		err = tx.QueryRowContext(ctx,
 			`INSERT INTO crashes (
 				target_id, first_seen, last_seen, fixed_at, stack, stack_fingerprint,
-				input_hash, minimized_input, issue_url, git_sha, dirty, go_version
-			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+				input_hash, minimized_input, input_bytes, input_truncated,
+				issue_url, git_sha, dirty, go_version,
+				blamed_module, blamed_version, blamed_file, blamed_line
+			) VALUES (
+				?, ?, ?, NULL, ?, ?,
+				?, ?, CASE WHEN ? != '' THEN unhex(?) ELSE NULL END, ?,
+				?, ?, ?, ?,
+				?, ?, ?, ?
+			) RETURNING id`,
 			c.TargetID, firstSeen, lastSeen, c.Stack, c.StackFingerprint,
-			c.InputHash, c.MinimizedInput, c.IssueURL, c.GitSHA, c.Dirty, c.GoVersion,
+			c.InputHash, c.MinimizedInput, inputHex, inputHex, inputTruncated,
+			c.IssueURL, c.GitSHA, c.Dirty, c.GoVersion,
+			c.BlamedModule, c.BlamedVersion, c.BlamedFile, c.BlamedLine,
 		).Scan(&id)
 		if err != nil {
 			return 0, fmt.Errorf("insert crash: %w", err)
@@ -763,17 +840,29 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 		     stack = CASE WHEN ? != '' THEN ? ELSE stack END,
 		     stack_fingerprint = CASE WHEN ? != '' THEN ? ELSE stack_fingerprint END,
 		     minimized_input = CASE WHEN ? != '' THEN ? ELSE minimized_input END,
+		     input_bytes = CASE WHEN ? != '' THEN unhex(?) ELSE input_bytes END,
+		     input_truncated = CASE WHEN ? != '' OR ? THEN ? ELSE COALESCE(input_truncated, FALSE) END,
 		     git_sha = CASE WHEN ? != '' THEN ? ELSE git_sha END,
 		     dirty = ?,
-		     go_version = CASE WHEN ? != '' THEN ? ELSE go_version END
+		     go_version = CASE WHEN ? != '' THEN ? ELSE go_version END,
+		     blamed_module = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_module, '') END,
+		     blamed_version = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_version, '') END,
+		     blamed_file = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_file, '') END,
+		     blamed_line = CASE WHEN ? > 0 THEN ? ELSE COALESCE(blamed_line, 0) END
 		 WHERE id = ?`,
 		lastSeen,
 		c.Stack, c.Stack,
 		c.StackFingerprint, c.StackFingerprint,
 		c.MinimizedInput, c.MinimizedInput,
+		inputHex, inputHex,
+		inputHex, inputTruncated, inputTruncated,
 		c.GitSHA, c.GitSHA,
 		c.Dirty,
 		c.GoVersion, c.GoVersion,
+		c.BlamedModule, c.BlamedModule,
+		c.BlamedVersion, c.BlamedVersion,
+		c.BlamedFile, c.BlamedFile,
+		c.BlamedLine, c.BlamedLine,
 		existingID,
 	)
 	if err != nil {
@@ -786,6 +875,28 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 		}
 	}
 	return existingID, tx.Commit()
+}
+
+// SetCrashIssue sets issue_url on a crash without marking it fixed.
+func (s *Store) SetCrashIssue(ctx context.Context, crashID int64, issueURL string) error {
+	if s.readonly != nil {
+		return ErrReadOnly
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE crashes SET issue_url = ? WHERE id = ?`,
+		issueURL, crashID,
+	)
+	if err != nil {
+		return fmt.Errorf("set crash %d issue: %w", crashID, err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("crash %d: %w", crashID, ErrNotFound)
+	}
+	return nil
 }
 
 // MarkCrashFixed marks a crash as fixed at fixedAt and optionally sets issueURL.
@@ -868,7 +979,15 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	query := `
+	ver, _ := s.schemaVersionLocked(ctx)
+	publicInputsCol := "COALESCE(p.public_inputs, FALSE)"
+	groupPublicInputs := ", p.public_inputs"
+	if ver > 0 && ver < 6 {
+		publicInputsCol = "FALSE"
+		groupPublicInputs = ""
+	}
+
+	query := fmt.Sprintf(`
 		SELECT
 			p.id,
 			p.name,
@@ -876,6 +995,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 			COALESCE(p.branch, ''),
 			COALESCE(p.git_sha, ''),
 			COALESCE(p.dirty, FALSE),
+			%s,
 			COALESCE(p.sync_error, ''),
 			p.last_synced,
 			COUNT(v.target_id) AS target_count,
@@ -888,9 +1008,9 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 			COALESCE(SUM(CASE WHEN v.status = 'ok' THEN 1 ELSE 0 END), 0) AS ok_targets
 		FROM projects p
 		LEFT JOIN latest_target_status v ON v.project_id = p.id
-		GROUP BY p.id, p.name, p.repo, p.branch, p.git_sha, p.dirty, p.sync_error, p.last_synced
+		GROUP BY p.id, p.name, p.repo, p.branch, p.git_sha, p.dirty%s, p.sync_error, p.last_synced
 		ORDER BY p.name ASC;
-	`
+	`, publicInputsCol, groupPublicInputs)
 
 	rows, err := s.query(ctx, query)
 	if err != nil {
@@ -905,7 +1025,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 		var lastRunAt sql.NullTime
 		var errTargets, okTargets int
 		if err := rows.Scan(
-			&p.ID, &p.Name, &p.Repo, &p.Branch, &p.GitSHA, &p.Dirty, &p.SyncError, &lastSynced,
+			&p.ID, &p.Name, &p.Repo, &p.Branch, &p.GitSHA, &p.Dirty, &p.PublicInputs, &p.SyncError, &lastSynced,
 			&p.TargetCount, &p.TotalRuns, &p.OpenCrashes, &lastRunAt,
 			&p.AvgExecsPerSec, &p.AvgCoveragePct, &errTargets, &okTargets,
 		); err != nil {
@@ -1057,21 +1177,105 @@ func (s *Store) ListRuns(ctx context.Context, targetFilter string, limit int) ([
 	return runs, nil
 }
 
+func (s *Store) crashSelectSQL(ctx context.Context) string {
+	ver, _ := s.schemaVersionLocked(ctx)
+	if ver > 0 && ver < 6 {
+		return `
+			SELECT
+				c.id, c.target_id, p.name AS project_name, t.package, t.name AS target_name,
+				FALSE AS public_inputs,
+				c.first_seen, c.last_seen, c.fixed_at, c.stack, COALESCE(c.stack_fingerprint, ''),
+				c.input_hash, c.minimized_input,
+				'' AS input_hex, FALSE AS input_truncated,
+				COALESCE(c.issue_url, ''),
+				COALESCE(c.git_sha, ''), COALESCE(c.dirty, FALSE), COALESCE(c.go_version, ''),
+				'' AS blamed_module, '' AS blamed_version, '' AS blamed_file, 0 AS blamed_line,
+				COALESCE((SELECT r.outcome FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), ''),
+				COALESCE((SELECT r.git_sha FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), ''),
+				(SELECT r.checked_at FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1),
+				COALESCE((SELECT r.diagnostic FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), '')
+			FROM crashes c
+			JOIN targets t ON t.id = c.target_id
+			JOIN projects p ON p.id = t.project_id
+		`
+	}
+	return `
+		SELECT
+			c.id, c.target_id, p.name AS project_name, t.package, t.name AS target_name,
+			COALESCE(p.public_inputs, FALSE),
+			c.first_seen, c.last_seen, c.fixed_at, c.stack, COALESCE(c.stack_fingerprint, ''),
+			c.input_hash, c.minimized_input,
+			COALESCE(hex(c.input_bytes), ''), COALESCE(c.input_truncated, FALSE),
+			COALESCE(c.issue_url, ''),
+			COALESCE(c.git_sha, ''), COALESCE(c.dirty, FALSE), COALESCE(c.go_version, ''),
+			COALESCE(c.blamed_module, ''), COALESCE(c.blamed_version, ''), COALESCE(c.blamed_file, ''), COALESCE(c.blamed_line, 0),
+			COALESCE((SELECT r.outcome FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), ''),
+			COALESCE((SELECT r.git_sha FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), ''),
+			(SELECT r.checked_at FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1),
+			COALESCE((SELECT r.diagnostic FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), '')
+		FROM crashes c
+		JOIN targets t ON t.id = c.target_id
+		JOIN projects p ON p.id = t.project_id
+	`
+}
+
+func scanCrashRow(scanner interface{ Scan(...any) error }) (Crash, error) {
+	var c Crash
+	var fixedAt sql.NullTime
+	var replayCheckedAt sql.NullTime
+	var inputHex string
+	if err := scanner.Scan(
+		&c.ID, &c.TargetID, &c.ProjectName, &c.Package, &c.TargetName,
+		&c.PublicInputs,
+		&c.FirstSeen, &c.LastSeen, &fixedAt, &c.Stack, &c.StackFingerprint,
+		&c.InputHash, &c.MinimizedInput,
+		&inputHex, &c.InputTruncated,
+		&c.IssueURL,
+		&c.GitSHA, &c.Dirty, &c.GoVersion,
+		&c.BlamedModule, &c.BlamedVersion, &c.BlamedFile, &c.BlamedLine,
+		&c.ReplayStatus, &c.ReplayGitSHA, &replayCheckedAt, &c.ReplayDiagnostic,
+	); err != nil {
+		return Crash{}, err
+	}
+	if fixedAt.Valid {
+		tm := fixedAt.Time
+		c.FixedAt = &tm
+	}
+	if replayCheckedAt.Valid {
+		tm := replayCheckedAt.Time
+		c.ReplayCheckedAt = &tm
+	}
+	if inputHex != "" {
+		if raw, err := hex.DecodeString(inputHex); err == nil {
+			c.InputBytes = raw
+		}
+	}
+	return c, nil
+}
+
+// GetCrash returns a single crash record by ID, or ErrNotFound if it does not exist.
+func (s *Store) GetCrash(ctx context.Context, crashID int64) (Crash, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := s.crashSelectSQL(ctx) + ` WHERE c.id = ?`
+	row := s.queryRow(ctx, query, crashID)
+	c, err := scanCrashRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Crash{}, fmt.Errorf("crash %d: %w", crashID, ErrNotFound)
+	}
+	if err != nil {
+		return Crash{}, fmt.Errorf("get crash %d: %w", crashID, err)
+	}
+	return c, nil
+}
+
 // ListCrashes returns crashes, optionally filtering to open crashes (fixed_at IS NULL) and/or a specific target.
 func (s *Store) ListCrashes(ctx context.Context, openOnly bool, targetFilter string) ([]Crash, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	query := `
-		SELECT
-			c.id, c.target_id, p.name AS project_name, t.package, t.name AS target_name,
-			c.first_seen, c.last_seen, c.fixed_at, c.stack, COALESCE(c.stack_fingerprint, ''),
-			c.input_hash, c.minimized_input, COALESCE(c.issue_url, ''),
-			COALESCE(c.git_sha, ''), COALESCE(c.dirty, FALSE), COALESCE(c.go_version, '')
-		FROM crashes c
-		JOIN targets t ON t.id = c.target_id
-		JOIN projects p ON p.id = t.project_id
-	`
+	query := s.crashSelectSQL(ctx)
 	var clauses []string
 	var args []any
 	if openOnly {
@@ -1094,19 +1298,9 @@ func (s *Store) ListCrashes(ctx context.Context, openOnly bool, targetFilter str
 
 	var crashes []Crash
 	for rows.Next() {
-		var c Crash
-		var fixedAt sql.NullTime
-		if err := rows.Scan(
-			&c.ID, &c.TargetID, &c.ProjectName, &c.Package, &c.TargetName,
-			&c.FirstSeen, &c.LastSeen, &fixedAt, &c.Stack, &c.StackFingerprint,
-			&c.InputHash, &c.MinimizedInput, &c.IssueURL,
-			&c.GitSHA, &c.Dirty, &c.GoVersion,
-		); err != nil {
+		c, err := scanCrashRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan crash: %w", err)
-		}
-		if fixedAt.Valid {
-			tm := fixedAt.Time
-			c.FixedAt = &tm
 		}
 		crashes = append(crashes, c)
 	}

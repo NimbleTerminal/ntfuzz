@@ -400,3 +400,104 @@ func TestStoreCannedStatsQueries(t *testing.T) {
 		t.Fatal("expected error for unknown window")
 	}
 }
+
+func TestCrashSharePersistenceTruncationAndV5Compatibility(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "share.duckdb")
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	pID, err := st.SyncProject(ctx, ProjectSyncInput{
+		Name:         "nt3d",
+		Repo:         "https://github.com/NimbleTerminal/nt3d",
+		GitSHA:       "112233445566",
+		PublicInputs: true,
+		SyncedAt:     &now,
+	})
+	if err != nil {
+		t.Fatalf("SyncProject: %v", err)
+	}
+	tID, err := st.UpsertTarget(ctx, pID, "nimbleterminal.dev/nt3d/mesh/gltf", "FuzzDecode")
+	if err != nil {
+		t.Fatalf("UpsertTarget: %v", err)
+	}
+
+	corpusBytes := []byte("go test fuzz v1\n[]byte(\"glTF\\x02\\x00\\x00\\x00\")\n")
+	cID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            "panic: runtime error: slice bounds out of range [::-1]\ngithub.com/qmuntal/gltf@v0.29.0/decoder.go:151",
+		StackFingerprint: "fp-gltf-151",
+		InputHash:        "0123456789abcdef0123456789abcdef",
+		MinimizedInput:   ".ntfuzz/corpus/nt3d/crashes/FuzzDecode/0123456789abcdef0123456789abcdef",
+		InputBytes:       corpusBytes,
+		GitSHA:           "112233445566",
+		GoVersion:        "go1.25.0",
+		BlamedModule:     "github.com/qmuntal/gltf",
+		BlamedVersion:    "v0.29.0",
+		BlamedFile:       "decoder.go",
+		BlamedLine:       151,
+	})
+	if err != nil {
+		t.Fatalf("RecordCrash: %v", err)
+	}
+
+	got, err := st.GetCrash(ctx, cID)
+	if err != nil {
+		t.Fatalf("GetCrash: %v", err)
+	}
+	if !got.PublicInputs || got.InputTruncated || string(got.InputBytes) != string(corpusBytes) {
+		t.Fatalf("unexpected stored input fields: public=%v truncated=%v bytes=%q", got.PublicInputs, got.InputTruncated, got.InputBytes)
+	}
+	if got.BlamedModule != "github.com/qmuntal/gltf" || got.BlamedVersion != "v0.29.0" || got.BlamedFile != "decoder.go" || got.BlamedLine != 151 {
+		t.Fatalf("unexpected blame fields: %+v", got)
+	}
+
+	// SetCrashIssue sets issue_url without marking the crash fixed.
+	if err := st.SetCrashIssue(ctx, cID, "https://github.com/qmuntal/gltf/security/advisories/GHSA-xxxx"); err != nil {
+		t.Fatalf("SetCrashIssue: %v", err)
+	}
+	gotAfterIssue, err := st.GetCrash(ctx, cID)
+	if err != nil {
+		t.Fatalf("GetCrash after SetCrashIssue: %v", err)
+	}
+	if gotAfterIssue.FixedAt != nil || gotAfterIssue.IssueURL != "https://github.com/qmuntal/gltf/security/advisories/GHSA-xxxx" {
+		t.Fatalf("expected open-reported crash, got fixed_at=%v issue_url=%q", gotAfterIssue.FixedAt, gotAfterIssue.IssueURL)
+	}
+
+	// Oversized input (> 64 KiB) is truncated at 64 KiB and flagged InputTruncated = true.
+	bigInput := make([]byte, MaxCrashInputBytes+1024)
+	for i := range bigInput {
+		bigInput[i] = byte('a' + (i % 26))
+	}
+	bigID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            "panic: oversized",
+		StackFingerprint: "fp-oversized",
+		InputHash:        "fedcba9876543210fedcba9876543210",
+		MinimizedInput:   "path/to/big",
+		InputBytes:       bigInput,
+	})
+	if err != nil {
+		t.Fatalf("RecordCrash oversized: %v", err)
+	}
+	gotBig, err := st.GetCrash(ctx, bigID)
+	if err != nil {
+		t.Fatalf("GetCrash oversized: %v", err)
+	}
+	if !gotBig.InputTruncated || len(gotBig.InputBytes) != MaxCrashInputBytes {
+		t.Fatalf("expected truncated 64 KiB input, got truncated=%v len=%d", gotBig.InputTruncated, len(gotBig.InputBytes))
+	}
+
+	// Missing crash returns ErrNotFound.
+	if _, err := st.GetCrash(ctx, 999999); err == nil {
+		t.Fatal("expected ErrNotFound for missing crash ID")
+	}
+}

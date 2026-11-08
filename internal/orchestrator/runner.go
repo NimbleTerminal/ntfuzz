@@ -38,7 +38,13 @@ type CrashArtifact struct {
 	InputHash        string
 	StackFingerprint string
 	MinimizedInput   string
+	InputBytes       []byte
+	InputTruncated   bool
 	Stack            string
+	BlamedModule     string
+	BlamedVersion    string
+	BlamedFile       string
+	BlamedLine       int
 }
 
 // JobResult contains parsed metrics, corpus size, coverage, and crash details from a completed fuzz run.
@@ -84,7 +90,7 @@ var (
 	// Go's own "nothing to run" diagnostics, anchored so target output cannot spoof them.
 	reMissingTarget = regexp.MustCompile(`(?m)^(?:testing: warning: no (?:fuzz )?tests to (?:fuzz|run)|\?\s+\S+\s+\[no test files\]|ok\s+\S+\s+[\d.]+s\s+\[no tests to run\])\s*$`)
 
-	reFileLine        = regexp.MustCompile(`(?m)([A-Za-z0-9_./\\-]+\.go):\d+(\s*\+0x[0-9a-fA-F]+)?`)
+	reFileLine        = regexp.MustCompile(`(?m)([A-Za-z0-9_./\\@!~+-]+\.go):\d+(\s*\+0x[0-9a-fA-F]+)?`)
 	reHexAddr         = regexp.MustCompile(`0x[0-9a-fA-F]+`)
 	reGoroutine       = regexp.MustCompile(`goroutine \d+`)
 	reFailDuration    = regexp.MustCompile(`\([0-9.]+s\)`)
@@ -173,18 +179,30 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 		res.Output = ""
 	}
 
-	// Persist crash artifacts into the corpus tree and hash their actual bytes
+	// Persist crash artifacts into the corpus tree, hash their actual bytes, and scrub/attribute stacks
 	pkgDir := job.RepoDir
 	if pkgArg != "." {
 		pkgDir = filepath.Join(job.RepoDir, strings.TrimPrefix(pkgArg, "./"))
 	}
+	modulePath := deriveModulePath(job.RepoDir, job.PkgImport, job.PkgRelDir)
+	goModCache := os.Getenv("GOMODCACHE")
 	crashStoreDir := filepath.Join(absCorpusRoot, "crashes", pkgSeg, job.TargetName)
 	for i := range res.CrashRecords {
 		rec := &res.CrashRecords[i]
+		attr := AttributeStack(rec.Stack, job.RepoDir, modulePath)
+		rec.BlamedModule = attr.Module
+		rec.BlamedVersion = attr.Version
+		rec.BlamedFile = attr.File
+		rec.BlamedLine = attr.Line
+		rec.Stack = ScrubStack(rec.Stack, job.RepoDir, modulePath, goModCache)
+		rec.StackFingerprint = FingerprintStack(rec.Stack)
 		if rec.MinimizedInput != "" && rec.MinimizedInput != "inline-failure" {
 			srcPath := rec.MinimizedInput
 			if !filepath.IsAbs(srcPath) {
 				srcPath = filepath.Join(pkgDir, srcPath)
+			}
+			if raw, readErr := os.ReadFile(srcPath); readErr == nil {
+				rec.InputBytes, rec.InputTruncated = CapCrashInput(raw)
 			}
 			if persistedPath, contentHash, copyErr := persistCrashInput(srcPath, crashStoreDir, job.CleanCrashInGit); copyErr == nil {
 				rec.MinimizedInput = persistedPath

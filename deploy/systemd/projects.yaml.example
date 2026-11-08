@@ -11,6 +11,8 @@ projects:
     repo: https://github.com/NimbleTerminal/ntfuzz.git
     branch: main
     fuzztime: 15s
+    # Opt in to serving GET /api/crashes/{id}/input in public snapshot view mode:
+    # public_inputs: true
 
   # Add your own Go repositories with native FuzzXxx(f *testing.F) targets:
   # - name: my-service

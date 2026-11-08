@@ -15,6 +15,7 @@ type Project struct {
 	Branch         string     `json:"branch,omitempty"`
 	GitSHA         string     `json:"git_sha,omitempty"`
 	Dirty          bool       `json:"dirty"`
+	PublicInputs   bool       `json:"public_inputs"`
 	SyncError      string     `json:"sync_error,omitempty"`
 	LastSynced     *time.Time `json:"last_synced,omitempty"`
 	TargetCount    int        `json:"target_count"`
@@ -35,6 +36,7 @@ func ProjectFromStore(p store.Project) Project {
 		Branch:         p.Branch,
 		GitSHA:         p.GitSHA,
 		Dirty:          p.Dirty,
+		PublicInputs:   p.PublicInputs,
 		SyncError:      p.SyncError,
 		LastSynced:     p.LastSynced,
 		TargetCount:    p.TargetCount,
@@ -156,6 +158,7 @@ type Crash struct {
 	ProjectName      string     `json:"project_name,omitempty"`
 	Package          string     `json:"package,omitempty"`
 	TargetName       string     `json:"target_name,omitempty"`
+	PublicInputs     bool       `json:"public_inputs"`
 	FirstSeen        time.Time  `json:"first_seen"`
 	LastSeen         time.Time  `json:"last_seen"`
 	FixedAt          *time.Time `json:"fixed_at,omitempty"`
@@ -163,10 +166,20 @@ type Crash struct {
 	StackFingerprint string     `json:"stack_fingerprint,omitempty"`
 	InputHash        string     `json:"input_hash"`
 	MinimizedInput   string     `json:"minimized_input"`
+	InputTruncated   bool       `json:"input_truncated"`
 	IssueURL         string     `json:"issue_url"`
 	GitSHA           string     `json:"git_sha,omitempty"`
 	Dirty            bool       `json:"dirty"`
 	GoVersion        string     `json:"go_version,omitempty"`
+	BlamedModule     string     `json:"blamed_module,omitempty"`
+	BlamedVersion    string     `json:"blamed_version,omitempty"`
+	BlamedFile       string     `json:"blamed_file,omitempty"`
+	BlamedLine       int        `json:"blamed_line,omitempty"`
+	BlamedURL        string     `json:"blamed_url,omitempty"`
+	ReplayStatus     string     `json:"replay_status,omitempty"`
+	ReplayGitSHA     string     `json:"replay_git_sha,omitempty"`
+	ReplayCheckedAt  *time.Time `json:"replay_checked_at,omitempty"`
+	ReplayDiagnostic string     `json:"replay_diagnostic,omitempty"`
 }
 
 // CrashFromStore converts a store.Crash into an API Crash DTO.
@@ -177,6 +190,7 @@ func CrashFromStore(c store.Crash) Crash {
 		ProjectName:      c.ProjectName,
 		Package:          c.Package,
 		TargetName:       c.TargetName,
+		PublicInputs:     c.PublicInputs,
 		FirstSeen:        c.FirstSeen,
 		LastSeen:         c.LastSeen,
 		FixedAt:          c.FixedAt,
@@ -184,10 +198,20 @@ func CrashFromStore(c store.Crash) Crash {
 		StackFingerprint: c.StackFingerprint,
 		InputHash:        c.InputHash,
 		MinimizedInput:   c.MinimizedInput,
+		InputTruncated:   c.InputTruncated,
 		IssueURL:         c.IssueURL,
 		GitSHA:           c.GitSHA,
 		Dirty:            c.Dirty,
 		GoVersion:        c.GoVersion,
+		BlamedModule:     c.BlamedModule,
+		BlamedVersion:    c.BlamedVersion,
+		BlamedFile:       c.BlamedFile,
+		BlamedLine:       c.BlamedLine,
+		BlamedURL:        orchestrator.DependencySourceURL(c.BlamedModule, c.BlamedVersion, c.BlamedFile, c.BlamedLine),
+		ReplayStatus:     c.ReplayStatus,
+		ReplayGitSHA:     c.ReplayGitSHA,
+		ReplayCheckedAt:  c.ReplayCheckedAt,
+		ReplayDiagnostic: c.ReplayDiagnostic,
 	}
 }
 
@@ -266,6 +290,11 @@ type StatusResponse struct {
 // FixCrashRequest is the JSON request body for POST /api/crashes/{id}/fix.
 type FixCrashRequest struct {
 	IssueURL string `json:"issue_url,omitempty"`
+}
+
+// IssueCrashRequest is the JSON request body for POST /api/crashes/{id}/issue.
+type IssueCrashRequest struct {
+	IssueURL string `json:"issue_url"`
 }
 
 // Canned stats query identifiers exposed by GET /api/stats and GET /api/stats/{query}.

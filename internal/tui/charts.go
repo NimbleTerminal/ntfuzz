@@ -164,7 +164,8 @@ func (m Model) renderStatsView() string {
 
 	switch activeQ.ID {
 	case api.StatsQueryBurndown:
-		b.WriteString(ansi.Truncate(fmt.Sprintf("Open: %d • New: %d • Reopened: %d • Resolved: %d", stats.OpenCrashes, stats.NewCrashes, stats.ReopenedCrashes, stats.ResolvedCrashes), contentWidth, "…") + "\n")
+		openUnreported, openReported := m.openCrashSplit(stats.OpenCrashes)
+		b.WriteString(ansi.Truncate(fmt.Sprintf("Open: %d (%d unreported, %d reported) • New: %d • Reopened: %d • Resolved: %d", stats.OpenCrashes, openUnreported, openReported, stats.NewCrashes, stats.ReopenedCrashes, stats.ResolvedCrashes), contentWidth, "…") + "\n")
 		points := make([]timeserieslinechart.TimePoint, 0, len(stats.Buckets))
 		for _, bk := range stats.Buckets {
 			points = append(points, timeserieslinechart.TimePoint{Time: bk.BucketStart, Value: float64(bk.OpenCrashes)})

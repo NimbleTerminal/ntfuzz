@@ -580,8 +580,8 @@ func ClassifyRoute(path string) string {
 	if isStatsQueryPath(path) {
 		return "/api/stats/{query}"
 	}
-	if isCrashFixPath(path) {
-		return "/api/crashes/{id}/fix"
+	if route := classifyCrashRoute(path); route != "" {
+		return route
 	}
 	return "other"
 }
@@ -595,14 +595,36 @@ func isStatsQueryPath(path string) bool {
 	return queryPart != "" && !strings.Contains(queryPart, "/")
 }
 
-func isCrashFixPath(path string) bool {
-	const prefix = "/api/crashes/"
-	const suffix = "/fix"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
-		return false
+func classifyCrashRoute(path string) string {
+	const htmlPrefix = "/crashes/"
+	if strings.HasPrefix(path, htmlPrefix) {
+		idPart := strings.TrimPrefix(path, htmlPrefix)
+		if idPart != "" && !strings.Contains(idPart, "/") {
+			return "/crashes/{id}"
+		}
+		return ""
 	}
-	idPart := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	return idPart != "" && !strings.Contains(idPart, "/")
+
+	const apiPrefix = "/api/crashes/"
+	if !strings.HasPrefix(path, apiPrefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(path, apiPrefix)
+	if rest == "" {
+		return ""
+	}
+	if !strings.Contains(rest, "/") {
+		return "/api/crashes/{id}"
+	}
+	for _, suffix := range []string{"/fix", "/issue", "/input", "/report.md"} {
+		if strings.HasSuffix(rest, suffix) {
+			idPart := strings.TrimSuffix(rest, suffix)
+			if idPart != "" && !strings.Contains(idPart, "/") {
+				return "/api/crashes/{id}" + suffix
+			}
+		}
+	}
+	return ""
 }
 
 // ClassifyMethod maps an HTTP method to a bounded label value.

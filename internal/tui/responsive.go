@@ -86,7 +86,8 @@ func (m Model) compactStatsView() tea.View {
 		summary := fmt.Sprintf("%d runs · %s", s.TotalRuns, FormatExecRate(s.AvgExecsPerSec))
 		switch m.currentStatsQuery().ID {
 		case api.StatsQueryBurndown:
-			summary = fmt.Sprintf("Open %d · New %d\nReopened %d · Resolved %d", s.OpenCrashes, s.NewCrashes, s.ReopenedCrashes, s.ResolvedCrashes)
+			openUnreported, openReported := m.openCrashSplit(s.OpenCrashes)
+			summary = fmt.Sprintf("Open %d (%du/%dr) · New %d\nReopened %d · Resolved %d", s.OpenCrashes, openUnreported, openReported, s.NewCrashes, s.ReopenedCrashes, s.ResolvedCrashes)
 		case api.StatsQueryCoverage:
 			summary = fmt.Sprintf("Coverage %.1f%%\nCorpus %d · New inputs %d", s.AvgCoveragePct, s.CorpusCount, s.NewInteresting)
 		case api.StatsQueryOutcomes:

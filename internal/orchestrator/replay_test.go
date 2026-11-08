@@ -61,6 +61,23 @@ func FuzzX(f *testing.F){ f.Fuzz(func(t *testing.T,s string){t.Skip("skip")}) }`
 	if got, _ := replayCrash(context.Background(), job, crash); got != "blocked" {
 		t.Fatal("missing input accepted")
 	}
+
+	// Stored InputBytes are preferred even when MinimizedInput file is missing on disk.
+	if err := os.WriteFile(filepath.Join(dir, "replay_test.go"), []byte(`package replay
+import "testing"
+func FuzzX(f *testing.F){ f.Fuzz(func(t *testing.T,s string){}) }`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	crashWithBytes := store.Crash{
+		ID:             2,
+		InputHash:      hex.EncodeToString(hash[:16]),
+		MinimizedInput: filepath.Join(t.TempDir(), "deleted-from-disk"),
+		InputBytes:     input,
+		InputTruncated: false,
+	}
+	if got, diag := replayCrash(context.Background(), job, crashWithBytes); got != "passed" {
+		t.Fatalf("expected stored InputBytes replay to pass without disk file, got %s: %s", got, diag)
+	}
 }
 
 func TestPendingReplayBypassesFuzzBackoff(t *testing.T) {

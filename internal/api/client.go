@@ -89,10 +89,49 @@ func (c *Client) GetCrashes(ctx context.Context, openOnly bool, target string) (
 	return out, err
 }
 
+// GetCrash fetches a single crash record from GET /api/crashes/{id}.
+func (c *Client) GetCrash(ctx context.Context, crashID int64) (Crash, error) {
+	path := fmt.Sprintf("/api/crashes/%d", crashID)
+	var out Crash
+	err := c.doJSON(ctx, http.MethodGet, path, nil, nil, &out)
+	return out, err
+}
+
+// GetCrashInput downloads the minimized corpus input bytes from GET /api/crashes/{id}/input.
+func (c *Client) GetCrashInput(ctx context.Context, crashID int64) ([]byte, error) {
+	path := fmt.Sprintf("/api/crashes/%d/input", crashID)
+	return c.doBytes(ctx, http.MethodGet, path, nil)
+}
+
+// GetCrashReport fetches the formatted Markdown crash report from GET /api/crashes/{id}/report.md,
+// using publicURL (or the client's BaseURL when publicURL is empty) for permalink and input URLs.
+func (c *Client) GetCrashReport(ctx context.Context, crashID int64, publicURL string) (string, error) {
+	path := fmt.Sprintf("/api/crashes/%d/report.md", crashID)
+	q := url.Values{}
+	base := strings.TrimSpace(publicURL)
+	if base == "" {
+		base = c.baseURL
+	}
+	if base != "" {
+		q.Set("public_url", base)
+	}
+	raw, err := c.doBytes(ctx, http.MethodGet, path, q)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
 // MarkCrashFixed marks a crash as fixed via POST /api/crashes/{id}/fix.
 func (c *Client) MarkCrashFixed(ctx context.Context, crashID int64, issueURL string) error {
 	path := fmt.Sprintf("/api/crashes/%d/fix", crashID)
 	return c.doJSON(ctx, http.MethodPost, path, nil, FixCrashRequest{IssueURL: issueURL}, nil)
+}
+
+// SetCrashIssue sets issue_url on an open crash without fixing it via POST /api/crashes/{id}/issue.
+func (c *Client) SetCrashIssue(ctx context.Context, crashID int64, issueURL string) error {
+	path := fmt.Sprintf("/api/crashes/%d/issue", crashID)
+	return c.doJSON(ctx, http.MethodPost, path, nil, IssueCrashRequest{IssueURL: issueURL}, nil)
 }
 
 // GetCoverageHistory fetches chronological coverage points from GET /api/coverage/history.
@@ -165,4 +204,28 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 		}
 	}
 	return nil
+}
+
+func (c *Client) doBytes(ctx context.Context, method, path string, query url.Values) ([]byte, error) {
+	u := c.baseURL + path
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request %s %s: %w", method, u, err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request %s %s: %w", method, u, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("%s %s returned HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }

@@ -695,3 +695,73 @@ func TestAllLiveActionDescriptionsFitStatusBudget(t *testing.T) {
 		}
 	}
 }
+
+func TestCrashesAndBurndownDistinguishReportedAndDependencyBlame(t *testing.T) {
+	now := time.Now().UTC()
+	m := NewModel(nil, time.Second)
+	m.width = 140
+	m.height = 40
+	m.openCrashes = []api.Crash{
+		{
+			ID:               23,
+			TargetID:         98,
+			ProjectName:      "nt3d",
+			Package:          "nimbleterminal.dev/nt3d/mesh/gltf",
+			TargetName:       "FuzzDecode",
+			FirstSeen:        now,
+			LastSeen:         now,
+			Stack:            "panic: slice bounds out of range [::-1]\ngithub.com/qmuntal/gltf@v0.29.0/decoder.go:151",
+			StackFingerprint: "fp23",
+			InputHash:        "hash23",
+			MinimizedInput:   "input23",
+			IssueURL:         "https://github.com/qmuntal/gltf/security/advisories/GHSA-1234",
+			BlamedModule:     "github.com/qmuntal/gltf",
+			BlamedVersion:    "v0.29.0",
+			BlamedFile:       "decoder.go",
+			BlamedLine:       151,
+			BlamedURL:        "https://github.com/qmuntal/gltf/blob/v0.29.0/decoder.go#L151",
+		},
+		{
+			ID:               24,
+			TargetID:         99,
+			ProjectName:      "nt3d",
+			Package:          "nimbleterminal.dev/nt3d/mesh/obj",
+			TargetName:       "FuzzParseObj",
+			FirstSeen:        now,
+			LastSeen:         now,
+			Stack:            "panic: local panic\nnimbleterminal.dev/nt3d/mesh/obj/obj.go:42",
+			StackFingerprint: "fp24",
+			InputHash:        "hash24",
+			MinimizedInput:   "input24",
+		},
+	}
+
+	crashesView := m.renderCrashesView()
+	for _, want := range []string{
+		"1 unreported, 1 reported",
+		"[REPORTED]",
+		"[UNREPORTED]",
+		"[DEP:github.com/qmuntal/gltf@v0.29.0]",
+		"[PROJECT]",
+		"https://github.com/qmuntal/gltf/blob/v0.29.0/decoder.go#L151",
+		"/crashes/23",
+	} {
+		if !strings.Contains(crashesView, want) {
+			t.Errorf("crashesView missing %q:\n%s", want, crashesView)
+		}
+	}
+
+	m.mode = ViewStats
+	m.statsQueryIdx = 4 // Burndown
+	m.statsData = api.StatsResponse{
+		Query:       api.StatsQueryBurndown,
+		Window:      api.StatsWindow24h,
+		OpenCrashes: 2,
+		NewCrashes:  2,
+		Buckets:     []api.StatsBucket{{BucketStart: now, OpenCrashes: 2, NewCrashes: 2}},
+	}
+	statsView := m.renderStatsView()
+	if !strings.Contains(statsView, "1 unreported, 1 reported") {
+		t.Fatalf("expected burndown summary to distinguish open-unreported and open-reported:\n%s", statsView)
+	}
+}

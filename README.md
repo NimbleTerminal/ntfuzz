@@ -19,17 +19,22 @@
   - Discovers `FuzzXxx(f *testing.F)` targets across multi-module repositories while respecting `//go:build` constraints and reconciling removed targets (`active = FALSE`).
   - Runs `go test -parallel=1 -fuzz=^FuzzXxx$ -fuzztime=...` with `GOMAXPROCS=1` per worker and per-module exclusion so `--workers N` runs exactly `N` fuzz processes without contending on the same module tree.
   - Prioritizes targets that recently added corpus entries and backs off flat targets.
-  - Copies minimized crash inputs into `.ntfuzz/corpus/<project>/crashes/...`, hashes the actual input bytes, and computes a normalized stack fingerprint (stripping paths, line numbers, and hex addresses).
+  - Copies minimized crash inputs into `.ntfuzz/corpus/<project>/crashes/...`, persists up to 64 KiB of the minimized corpus file bytes directly in DuckDB (`input_bytes`, `input_truncated`) so published snapshots are self-contained, hashes the actual input bytes, scrubs server-local repo and `GOMODCACHE` paths to Go module paths at record time, attributes crashes whose top non-runtime frame is in an external dependency (`blamed_module`, `blamed_version`, `blamed_file`, `blamed_line`, `blamed_url`), and computes a normalized stack fingerprint.
   - Replays the cached fuzz corpus (`-test.fuzzcachedir`) under `-cover` to track real corpus statement coverage alongside corpus size (`corpus_count`).
 - **DuckDB Metadata & History Store**:
-  - Versioned schema migrations (`schema_migrations` table, currently v3) for `projects`, `targets`, `runs`, `crashes`, indexes, and a single-query `latest_target_status` view that aggregates 10-point coverage trends via DuckDB `LIST`.
+  - Versioned schema migrations (`schema_migrations` table, currently v6) for `projects`, `targets`, `runs`, `crashes`, indexes, and a single-query `latest_target_status` view that aggregates 10-point coverage trends via DuckDB `LIST`.
   - Automatic 14-day run retention pruning (preserving at least the latest 10 runs per target).
-- **HTTP JSON API (`/api/*`)**:
-  - `GET /api/projects` — project list with revision, sync status, and latest summary
+- **HTTP JSON API & Shareable Crash Permalinks (`/api/*`, `/crashes/{id}`)**:
+  - `GET /api/projects` — project list with revision, `public_inputs`, sync status, and latest summary
   - `GET /api/targets?project=...` — active targets with latest run metrics, corpus count, and coverage trend
   - `GET /api/runs?target=...&limit=100` — recent run history with `git_sha`, `dirty`, and `go_version`
-  - `GET /api/crashes?open=true` — open (or all) crashes with stack traces, stack fingerprints, and durable corpus paths
-  - `POST /api/crashes/{id}/fix` — mark a crash fixed (and optionally attach `issue_url`)
+  - `GET /api/crashes?open=true` — open (or all) crashes with scrubbed stack traces, stack fingerprints, dependency blame, replay status, and issue links
+  - `GET /api/crashes/{id}` — single crash JSON record (404 JSON error otherwise)
+  - `GET /crashes/{id}` — server-rendered HTML crash permalink (no JS required) with stack, dependency blame link, replay status, corpus download link, and a direct link to open the interactive Web Terminal Dashboard (`/`)
+  - `GET /api/crashes/{id}/input` — Go fuzz v1 corpus reproducer download (`Content-Disposition: attachment; filename=<input_hash>`); always served in `serve` mode, and served in `view` mode when the project opts in via `public_inputs: true` (403 otherwise)
+  - `GET /api/crashes/{id}/report.md` — shareable Markdown crash report for upstream maintainers
+  - `POST /api/crashes/{id}/issue` — attach an upstream `issue_url` to an open crash without marking it fixed (`serve` only)
+  - `POST /api/crashes/{id}/fix` — mark a crash fixed (and optionally attach `issue_url`, `serve` only)
   - `GET /api/coverage/history?target=...` — chronological coverage & corpus growth series
   - `GET /api/stats/{query}?window=24h&project=...` — canned time-bucketed analytical queries (`throughput`, `coverage`, `outcomes`, `revisions`, `burndown`) over `1h`, `6h`, `24h`, `7d`, or `14d`
   - `GET /api/status` — fleet health, 24h run counts, schema version, and active worker jobs
@@ -74,9 +79,11 @@ Then:
   task tui
   # or: ./bin/ntfuzz tui --api http://127.0.0.1:8080
   ```
-- **Crash Triage CLI**:
+- **Crash Triage & Upstream Reporting CLI**:
   ```bash
   ./bin/ntfuzz crash list --api http://127.0.0.1:8080
+  ./bin/ntfuzz crash link 1 --issue https://github.com/org/repo/issues/42
+  ./bin/ntfuzz crash report 1 --api http://127.0.0.1:8080 --public-url https://fuzz.example.com
   ./bin/ntfuzz crash fixed 1 --issue https://github.com/org/repo/issues/42
   ```
 - **HTTP JSON API**:
@@ -114,6 +121,7 @@ projects:
     branch: master
     fuzztime: 30s
     corpus_dir: .ntfuzz/corpus/klauspost-compress
+    public_inputs: true # Allow GET /api/crashes/{id}/input in public snapshot view mode
 ```
 
 ---
@@ -343,15 +351,19 @@ cannot refresh to v3 snapshots.
 
 The browser dashboard includes server-rendered links to open crashes, projects,
 status, API documentation (`/api/docs`), and an agent guide (`/llms.txt`).
-`/openapi.json` describes the six read endpoints shared by `serve` and `view`,
-including response schemas and query parameters. These embedded resources need
-no JavaScript or external documentation service.
+`/openapi.json` describes the read endpoints shared by `serve` and `view`,
+including per-crash permalinks (`/crashes/{id}`, `/api/crashes/{id}`), Markdown
+advisory reports (`/api/crashes/{id}/report.md`), opt-in corpus downloads
+(`/api/crashes/{id}/input`), response schemas, and query parameters. These
+embedded resources need no JavaScript or external documentation service.
 
 HTML link relations and HTTP `Link` headers advertise `service-doc`,
 `service-desc`, and `describedby`. The guide explains crash investigation,
-numeric target IDs, snapshot freshness, and server-local corpus paths.
-Private live-server crash-fixing remains an operator action outside this read
-API description; public snapshot viewers still expose no mutation endpoint.
+dependency blame links, reproducer downloads when `public_inputs: true` is
+enabled on a project, numeric target IDs, and snapshot freshness.
+Private live-server crash mutations (`POST /api/crashes/{id}/issue` and
+`POST /api/crashes/{id}/fix`) remain operator actions outside this read API
+description; public snapshot viewers expose no mutation endpoint.
 
 ## Open Collaboration
 

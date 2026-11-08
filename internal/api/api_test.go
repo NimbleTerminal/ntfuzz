@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -248,6 +250,227 @@ func TestRevisionAndReplayEndpoints(t *testing.T) {
 			if rec.Code != 400 {
 				t.Fatalf("invalid stats query accepted: %s", path)
 			}
+		}
+	}
+}
+
+func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "crash_share.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+
+	// Project 1: nt3d with public_inputs = true
+	pPublicID, err := st.SyncProject(ctx, store.ProjectSyncInput{
+		Name:         "nt3d",
+		Repo:         "https://github.com/NimbleTerminal/nt3d",
+		GitSHA:       "9a8b7c6d5e4f",
+		PublicInputs: true,
+		SyncedAt:     &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tPublicID, err := st.UpsertTarget(ctx, pPublicID, "nimbleterminal.dev/nt3d/mesh/gltf", "FuzzDecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	corpusData := []byte("go test fuzz v1\n[]byte(\"glTF\\x02\\x00\\x00\\x00\\xff\\xff\")\n")
+	scrubbedStack := "panic: runtime error: slice bounds out of range [::-1]\n" +
+		"github.com/qmuntal/gltf.(*Decoder).decodeBuffer\n" +
+		"    github.com/qmuntal/gltf@v0.29.0/decoder.go:151\n" +
+		"github.com/qmuntal/gltf.(*Decoder).Decode\n" +
+		"    github.com/qmuntal/gltf@v0.29.0/decoder.go:74\n" +
+		"nimbleterminal.dev/nt3d/mesh/gltf.Decode\n" +
+		"    nimbleterminal.dev/nt3d/mesh/gltf/gltf.go:108"
+
+	pubCrashID, err := st.RecordCrash(ctx, store.Crash{
+		TargetID:         tPublicID,
+		FirstSeen:        now.Add(-time.Hour),
+		LastSeen:         now,
+		Stack:            scrubbedStack,
+		StackFingerprint: "aabbccddeeff001122334455",
+		InputHash:        "deadbeefcafebabe0123456789abcdef",
+		MinimizedInput:   ".ntfuzz/corpus/nt3d/crashes/FuzzDecode/deadbeefcafebabe0123456789abcdef",
+		InputBytes:       corpusData,
+		GitSHA:           "9a8b7c6d5e4f",
+		Dirty:            false,
+		GoVersion:        "go1.25.0",
+		BlamedModule:     "github.com/qmuntal/gltf",
+		BlamedVersion:    "v0.29.0",
+		BlamedFile:       "decoder.go",
+		BlamedLine:       151,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Project 2: private-proj with public_inputs = false
+	pPrivID, err := st.SyncProject(ctx, store.ProjectSyncInput{
+		Name:         "private-proj",
+		Repo:         "https://github.com/example/private-proj",
+		GitSHA:       "111122223333",
+		PublicInputs: false,
+		SyncedAt:     &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tPrivID, err := st.UpsertTarget(ctx, pPrivID, "example.com/private-proj/pkg", "FuzzPriv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	privCrashID, err := st.RecordCrash(ctx, store.Crash{
+		TargetID:         tPrivID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            "panic: local panic\nexample.com/private-proj/pkg/priv.go:12",
+		StackFingerprint: "11223344556677889900aabb",
+		InputHash:        "privhash12345678",
+		MinimizedInput:   ".ntfuzz/corpus/private-proj/crashes/FuzzPriv/privhash12345678",
+		InputBytes:       corpusData,
+		GitSHA:           "111122223333",
+		GoVersion:        "go1.25.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	liveSrv := httptest.NewServer(NewServer(st, nil))
+	defer liveSrv.Close()
+	snapSrv := httptest.NewServer(NewSnapshotServer(st, store.Snapshot{
+		File:          "snapshot-1.duckdb",
+		PublishedAt:   now,
+		SchemaVersion: store.CurrentSchemaVersion,
+	}))
+	defer snapSrv.Close()
+
+	liveClient := NewClient(liveSrv.URL)
+	snapClient := NewClient(snapSrv.URL)
+
+	// 1. GET /api/crashes/{id} returns one crash record or 404 JSON error.
+	gotCrash, err := snapClient.GetCrash(ctx, pubCrashID)
+	if err != nil {
+		t.Fatalf("GetCrash(%d): %v", pubCrashID, err)
+	}
+	if gotCrash.BlamedModule != "github.com/qmuntal/gltf" ||
+		gotCrash.BlamedURL != "https://github.com/qmuntal/gltf/blob/v0.29.0/decoder.go#L151" ||
+		!gotCrash.PublicInputs {
+		t.Fatalf("unexpected crash DTO: %+v", gotCrash)
+	}
+	notFoundRec, err := http.Get(snapSrv.URL + "/api/crashes/99999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = notFoundRec.Body.Close()
+	if notFoundRec.StatusCode != http.StatusNotFound || !strings.HasPrefix(notFoundRec.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("expected 404 JSON error for missing crash, got %d %s", notFoundRec.StatusCode, notFoundRec.Header.Get("Content-Type"))
+	}
+
+	// 2. POST /api/crashes/{id}/issue sets issue_url on open crash in serve mode without fixing it; rejected in view mode.
+	advisoryURL := "https://github.com/qmuntal/gltf/security/advisories/GHSA-1234-5678-90ab"
+	if err := snapClient.SetCrashIssue(ctx, pubCrashID, advisoryURL); err == nil {
+		t.Fatal("expected SetCrashIssue to be rejected in read-only snapshot mode")
+	}
+	if err := liveClient.SetCrashIssue(ctx, pubCrashID, "javascript:alert(1)"); err == nil {
+		t.Fatal("expected invalid scheme in SetCrashIssue to be rejected")
+	}
+	if err := liveClient.SetCrashIssue(ctx, pubCrashID, advisoryURL); err != nil {
+		t.Fatalf("liveClient.SetCrashIssue: %v", err)
+	}
+	afterIssue, err := liveClient.GetCrash(ctx, pubCrashID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterIssue.FixedAt != nil || afterIssue.IssueURL != advisoryURL {
+		t.Fatalf("expected open-reported crash with FixedAt=nil and IssueURL=%q, got %+v", advisoryURL, afterIssue)
+	}
+
+	// 3. GET /api/crashes/{id}/input honors public_inputs in view mode and always serves in serve mode.
+	inputResp, err := http.Get(fmt.Sprintf("%s/api/crashes/%d/input", snapSrv.URL, pubCrashID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = inputResp.Body.Close()
+	if inputResp.StatusCode != http.StatusOK ||
+		inputResp.Header.Get("Content-Disposition") != "attachment; filename=deadbeefcafebabe0123456789abcdef" {
+		t.Fatalf("unexpected public input headers: status=%d cd=%q", inputResp.StatusCode, inputResp.Header.Get("Content-Disposition"))
+	}
+	downloaded, err := snapClient.GetCrashInput(ctx, pubCrashID)
+	if err != nil || string(downloaded) != string(corpusData) {
+		t.Fatalf("GetCrashInput public mismatch: %q (err=%v)", downloaded, err)
+	}
+
+	// Private project input returns 403 in view mode, but 200 in serve mode.
+	privSnapResp, err := http.Get(fmt.Sprintf("%s/api/crashes/%d/input", snapSrv.URL, privCrashID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = privSnapResp.Body.Close()
+	if privSnapResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for public_inputs=false in view mode, got %d", privSnapResp.StatusCode)
+	}
+	privLiveBytes, err := liveClient.GetCrashInput(ctx, privCrashID)
+	if err != nil || string(privLiveBytes) != string(corpusData) {
+		t.Fatalf("expected serve mode to always serve input bytes, got %q (err=%v)", privLiveBytes, err)
+	}
+
+	// 4. GET /crashes/{id} serves server-rendered HTML in both serve and view modes.
+	for modeName, baseURL := range map[string]string{"serve": liveSrv.URL, "view": snapSrv.URL} {
+		resp, err := http.Get(fmt.Sprintf("%s/crashes/%d", baseURL, pubCrashID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pageBuf strings.Builder
+		_, _ = io.Copy(&pageBuf, resp.Body)
+		_ = resp.Body.Close()
+		page := pageBuf.String()
+		if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+			t.Fatalf("%s GET /crashes/%d: status=%d ct=%s", modeName, pubCrashID, resp.StatusCode, resp.Header.Get("Content-Type"))
+		}
+		for _, wantToken := range []string{
+			"nt3d",
+			"nimbleterminal.dev/nt3d/mesh/gltf",
+			"FuzzDecode",
+			"9a8b7c6d5e4f",
+			"go1.25.0",
+			"OPEN · REPORTED",
+			advisoryURL,
+			"github.com/qmuntal/gltf@v0.29.0",
+			"https://github.com/qmuntal/gltf/blob/v0.29.0/decoder.go#L151",
+			fmt.Sprintf("/api/crashes/%d/input", pubCrashID),
+			`href="/"`,
+			"go test ./mesh/gltf -run &#39;FuzzDecode/deadbeefcafebabe0123456789abcdef&#39;",
+		} {
+			if !strings.Contains(page, wantToken) {
+				t.Errorf("%s HTML page missing %q:\n%s", modeName, wantToken, page)
+			}
+		}
+	}
+
+	// 5. GET /api/crashes/{id}/report.md renders shareable Markdown report.
+	md, err := snapClient.GetCrashReport(ctx, pubCrashID, "https://fuzz.nimbleterminal.com")
+	if err != nil {
+		t.Fatalf("GetCrashReport: %v", err)
+	}
+	for _, wantMD := range []string{
+		fmt.Sprintf("# Crash #%d: nt3d FuzzDecode", pubCrashID),
+		"[`github.com/qmuntal/gltf@v0.29.0`](https://github.com/qmuntal/gltf/blob/v0.29.0/decoder.go#L151)",
+		"github.com/qmuntal/gltf@v0.29.0/decoder.go:151",
+		"go1.25.0",
+		"9a8b7c6d5e4f",
+		fmt.Sprintf("https://fuzz.nimbleterminal.com/crashes/%d", pubCrashID),
+		fmt.Sprintf("https://fuzz.nimbleterminal.com/api/crashes/%d/input", pubCrashID),
+		"go test ./mesh/gltf -run 'FuzzDecode/deadbeefcafebabe0123456789abcdef'",
+		"go test fuzz v1",
+	} {
+		if !strings.Contains(md, wantMD) {
+			t.Errorf("Markdown report missing %q:\n%s", wantMD, md)
 		}
 	}
 }
