@@ -122,11 +122,19 @@ func scrubSingleLine(line, cleanRepo, cleanMod, cleanModCache, prevFuncPkg strin
 			return match
 		}
 		replaced := scrubSingleFilePath(origPath, cleanRepo, cleanMod, cleanModCache, prevFuncPkg)
-		if !isValidScrubFilePath(replaced) {
+		if !isValidScrubFilePath(replaced) || !isValidScrubStart(replaced) || filepath.Base(replaced) != base {
 			return match
 		}
 		return replaced + lineNum
 	})
+}
+
+func isValidScrubStart(p string) bool {
+	if p == "" {
+		return false
+	}
+	c := p[0]
+	return c == '/' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'
 }
 
 func scrubSingleFilePath(origPath, cleanRepo, cleanMod, cleanModCache, prevFuncPkg string) string {

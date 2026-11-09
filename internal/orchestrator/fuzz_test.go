@@ -206,6 +206,7 @@ func FuzzAttributeAndScrubStack(f *testing.F) {
 		"nimbleterminal.dev/nt3d",
 		"/var/lib/ntfuzz/.cache/go-mod",
 	)
+	f.Add("0.go:/0/0@v0/0.go:0", "0", "0", "0")
 	f.Add("", "", "", "")
 
 	f.Fuzz(func(t *testing.T, stack, repoDir, modulePath, goModCache string) {
