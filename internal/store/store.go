@@ -703,6 +703,17 @@ func (s *Store) SyncProject(ctx context.Context, in ProjectSyncInput) (int64, er
 	return id, s.recordRevisionLocked(ctx, id, in)
 }
 
+// SetProjectPublicInputs updates the public_inputs flag for an existing project by name.
+func (s *Store) SetProjectPublicInputs(ctx context.Context, name string, publicInputs bool) error {
+	if s.readonly != nil {
+		return ErrReadOnly
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `UPDATE projects SET public_inputs = ? WHERE name = ?`, publicInputs, name)
+	return err
+}
+
 // UpsertTarget ensures a target (project_id, package, name) exists and is marked active, returning its ID.
 func (s *Store) UpsertTarget(ctx context.Context, projectID int64, pkg, name string) (int64, error) {
 	if s.readonly != nil {

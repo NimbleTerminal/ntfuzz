@@ -117,6 +117,17 @@ func (o *Orchestrator) WorkerCount() int {
 	return o.workers
 }
 
+// SyncProjectConfig updates project public_inputs flags in DuckDB immediately
+// before the initial snapshot is published on startup, without waiting for git network operations.
+func (o *Orchestrator) SyncProjectConfig(ctx context.Context) {
+	for _, proj := range o.cfg.Projects {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = o.store.SetProjectPublicInputs(ctx, proj.Name, proj.PublicInputs)
+	}
+}
+
 // SyncAll synchronizes all configured projects, records git revision state (or visible sync errors),
 // and reconciles discovered fuzz targets in DuckDB.
 func (o *Orchestrator) SyncAll(ctx context.Context) []scheduledTarget {

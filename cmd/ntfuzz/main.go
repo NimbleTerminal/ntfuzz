@@ -91,6 +91,14 @@ func newServeCmd() *cobra.Command {
 			if srvMetrics != nil {
 				st.SetMetrics(srvMetrics)
 			}
+			orch := orchestrator.New(cfg, st, orchestrator.Options{
+				Workers:       workers,
+				RoundInterval: roundInterval,
+				Logger:        logger,
+			})
+			// Apply project config flags (such as public_inputs) before publishing the initial snapshot.
+			orch.SyncProjectConfig(ctx)
+
 			if snapshotDir != "" {
 				snapshotCtx, cancelSnapshots := context.WithCancel(ctx)
 				done := make(chan struct{})
@@ -115,12 +123,6 @@ func newServeCmd() *cobra.Command {
 				}()
 				defer func() { cancelSnapshots(); <-done }()
 			}
-
-			orch := orchestrator.New(cfg, st, orchestrator.Options{
-				Workers:       workers,
-				RoundInterval: roundInterval,
-				Logger:        logger,
-			})
 
 			var orchWG sync.WaitGroup
 			defer func() { stop(); orchWG.Wait() }()
