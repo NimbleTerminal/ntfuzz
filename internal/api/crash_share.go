@@ -209,20 +209,35 @@ func (s *Server) handleCrashInput(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+func requestBaseURL(r *http.Request) (string, error) {
+	if r.URL.Query().Has("public_url") {
+		return ValidatePublicURL(r.URL.Query().Get("public_url"))
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" {
+		return "", nil
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		scheme = "https"
+	}
+	validated, err := ValidatePublicURL(scheme + "://" + host)
+	if err != nil {
+		return "", nil
+	}
+	return validated, nil
+}
+
 func (s *Server) handleCrashReport(w http.ResponseWriter, r *http.Request) {
 	crashID, err := parseCrashIDParam(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	baseURL := ""
-	if r.URL.Query().Has("public_url") {
-		validated, err := ValidatePublicURL(r.URL.Query().Get("public_url"))
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		baseURL = validated
+	baseURL, err := requestBaseURL(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
 	}
 	c, err := s.store.GetCrash(r.Context(), crashID)
 	if err != nil {
@@ -309,6 +324,9 @@ func FormatCrashReportMarkdown(c Crash, inputBytes []byte, baseURL string, allow
 		projectLabel = "project"
 	}
 
+	modRoot := store.DeriveModuleRoot(c.ProjectName, c.Package)
+	scrubbedStack := store.ScrubStack(c.Stack, "", modRoot, "")
+
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# Crash #%d: %s %s\n\n", c.ID, projectLabel, targetLabel)
 
@@ -338,8 +356,10 @@ func FormatCrashReportMarkdown(c Crash, inputBytes []byte, baseURL string, allow
 		} else {
 			fmt.Fprintf(&sb, "- **Blamed Dependency:** `%s`%s\n", depRef, loc)
 		}
-	} else {
+	} else if store.HasProjectFrame(scrubbedStack, "", modRoot) {
 		fmt.Fprintf(&sb, "- **Blamed Component:** `%s` (project code)\n", projectLabel)
+	} else {
+		sb.WriteString("- **Blamed Component:** not attributed\n")
 	}
 
 	fmt.Fprintf(&sb, "- **Project:** `%s`\n", projectLabel)
@@ -377,7 +397,7 @@ func FormatCrashReportMarkdown(c Crash, inputBytes []byte, baseURL string, allow
 	}
 
 	sb.WriteString("\n## Stack Trace\n\n```text\n")
-	sb.WriteString(strings.TrimRight(c.Stack, "\n"))
+	sb.WriteString(strings.TrimRight(scrubbedStack, "\n"))
 	sb.WriteString("\n```\n")
 
 	pkgArg := DeriveRelativePackageArg(c.ProjectName, c.Package)
@@ -499,7 +519,10 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
 		}
 	}
 
-	blamedHTML := fmt.Sprintf(`<span class="badge badge-project">PROJECT</span> <code>%s</code> (in-repo frame)`, esc(project))
+	modRoot := store.DeriveModuleRoot(c.ProjectName, c.Package)
+	scrubbedStack := store.ScrubStack(c.Stack, "", modRoot, "")
+
+	blamedHTML := `<span class="muted">not attributed</span>`
 	if c.BlamedModule != "" {
 		depRef := c.BlamedModule
 		if c.BlamedVersion != "" {
@@ -520,6 +543,8 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
 				blamedHTML += fmt.Sprintf(` (<code>%s</code>)`, esc(loc))
 			}
 		}
+	} else if store.HasProjectFrame(scrubbedStack, "", modRoot) {
+		blamedHTML = fmt.Sprintf(`<span class="badge badge-project">PROJECT</span> <code>%s</code> (in-repo frame)`, esc(project))
 	}
 
 	replayHTML := `<span class="muted">not replayed yet</span>`
@@ -722,6 +747,7 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
         Server-rendered crash permalink (no JavaScript required). Need interactive coverage charts or live target history?
         <a href="/">Open the ntfuzz Web Terminal Dashboard</a>.
       </p>
+      <!--email_off-->
       <table>
         <tbody>
           <tr><th>Blamed Source</th><td>%s</td></tr>
@@ -739,6 +765,7 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
           <tr><th>Input Hash</th><td><code>%s</code></td></tr>
         </tbody>
       </table>
+      <!--/email_off-->
       <div class="actions">
         %s
         <a class="btn" href="/api/crashes/%d/report.md">View Markdown Advisory (.md)</a>
@@ -748,8 +775,10 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
     </section>
 
     <section class="panel">
-      <h2>Scrubbed Stack Trace</h2>
+      <h2>Stack Trace</h2>
+      <!--email_off-->
       <pre><code>%s</code></pre>
+      <!--/email_off-->
     </section>
 
     <section class="panel">
@@ -783,7 +812,7 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
 		esc(c.InputHash),
 		inputLinkHTML,
 		c.ID, c.ID,
-		esc(c.Stack),
+		esc(scrubbedStack),
 		esc(corpusRelPath),
 		esc(reproCmd),
 		corpusPreviewHTML,

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -501,14 +502,23 @@ func TestCrashSharePersistenceTruncationAndV5Compatibility(t *testing.T) {
 		t.Fatal("expected ErrNotFound for missing crash ID")
 	}
 
-	// Verify legacy dependency crash fingerprint migration & deduplication:
-	// Simulate a pre-v6 row whose stack_fingerprint was computed with LegacyFingerprintStack on the raw path.
-	rawDepStack := "panic: runtime error: slice bounds out of range [::-1]\ngithub.com/qmuntal/gltf.(*Decoder).decodeBuffer\n\t/var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:151"
-	scrubbedDepStack := "panic: runtime error: slice bounds out of range [::-1]\ngithub.com/qmuntal/gltf.(*Decoder).decodeBuffer\n\tgithub.com/qmuntal/gltf@v0.29.0/decoder.go:151"
+	// Verify legacy dependency crash fingerprint migration, stack scrubbing, & attribution backfill:
+	// Simulate a pre-v6 row whose stack has testing.go:2078: panic: ... and raw /var/lib/ntfuzz/... paths with empty blamed_module.
+	rawDepStack := "--- FAIL: FuzzDecode (0.04s)\n    --- FAIL: FuzzDecode (0.00s)\n        testing.go:2078: panic: runtime error: slice bounds out of range [::-1]\n        goroutine 22 [running]:\n        github.com/qmuntal/gltf.(*Decoder).decodeBuffer(0xc0001a2000, 0x0)\n        \t/var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:151 +0x359"
+	scrubbedDepStack := "--- FAIL: FuzzDecode (0.04s)\n    --- FAIL: FuzzDecode (0.00s)\n        testing.go:2078: panic: runtime error: slice bounds out of range [::-1]\n        goroutine 22 [running]:\n        github.com/qmuntal/gltf.(*Decoder).decodeBuffer(0xc0001a2000, 0x0)\n        \tgithub.com/qmuntal/gltf@v0.29.0/decoder.go:151 +0x359"
 	oldFP := LegacyFingerprintStack(rawDepStack)
 	newFP := FingerprintStack(scrubbedDepStack)
 	if oldFP == newFP {
 		t.Fatalf("expected legacy and new fingerprints to differ on @v0.29.0 path")
+	}
+	legacyCorpusDir := filepath.Join(t.TempDir(), "crashes", "FuzzDecode")
+	if err := os.MkdirAll(legacyCorpusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyInputFile := filepath.Join(legacyCorpusDir, "legacy-input-hash-111")
+	legacyInputBytes := []byte("go test fuzz v1\n[]byte(\"gltf-repro\")\n")
+	if err := os.WriteFile(legacyInputFile, legacyInputBytes, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	legacyCrashID, err := st.RecordCrash(ctx, Crash{
 		TargetID:         tID,
@@ -517,14 +527,30 @@ func TestCrashSharePersistenceTruncationAndV5Compatibility(t *testing.T) {
 		Stack:            rawDepStack,
 		StackFingerprint: oldFP,
 		InputHash:        "legacy-input-hash-111",
-		MinimizedInput:   "legacy-path",
+		MinimizedInput:   legacyInputFile,
 	})
 	if err != nil {
 		t.Fatalf("RecordCrash legacy: %v", err)
 	}
-	// Recompute fingerprints as migration v6 does, then record a new input for the same scrubbed stack.
-	if err := st.recomputeCrashFingerprints(ctx); err != nil {
-		t.Fatalf("recomputeCrashFingerprints: %v", err)
+	// Run backfillCrashes as Migrate does, then verify attribution, scrubbing, input_bytes backfill, and fingerprint deduplication.
+	if err := st.backfillCrashes(ctx); err != nil {
+		t.Fatalf("backfillCrashes: %v", err)
+	}
+	backfilled, err := st.GetCrash(ctx, legacyCrashID)
+	if err != nil {
+		t.Fatalf("GetCrash(legacyCrashID): %v", err)
+	}
+	if backfilled.BlamedModule != "github.com/qmuntal/gltf" ||
+		backfilled.BlamedVersion != "v0.29.0" ||
+		backfilled.BlamedFile != "decoder.go" ||
+		backfilled.BlamedLine != 151 {
+		t.Fatalf("expected backfillCrashes to populate gltf v0.29.0 attribution, got %+v", backfilled)
+	}
+	if backfilled.Stack != scrubbedDepStack {
+		t.Fatalf("expected backfillCrashes to scrub stack, got:\n%s", backfilled.Stack)
+	}
+	if string(backfilled.InputBytes) != string(legacyInputBytes) {
+		t.Fatalf("expected backfillCrashes to backfill InputBytes from disk, got %q", backfilled.InputBytes)
 	}
 	dedupCrashID, err := st.RecordCrash(ctx, Crash{
 		TargetID:         tID,

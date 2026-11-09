@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"nimbleterminal.dev/ntduckbox"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -451,17 +452,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 				return fmt.Errorf("migration v%d (%q): %w", m.version, stmt, err)
 			}
 		}
-		if m.version == 6 {
-			if err := s.recomputeCrashFingerprints(ctx); err != nil {
-				return fmt.Errorf("migration v6 recompute crash fingerprints: %w", err)
-			}
-		}
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
 			m.version, now,
 		); err != nil {
 			return fmt.Errorf("record migration v%d: %w", m.version, err)
 		}
+	}
+
+	if err := s.backfillCrashes(ctx); err != nil {
+		return fmt.Errorf("backfill crashes: %w", err)
 	}
 
 	// Always ensure the view reflects the latest schema and folds the last-10 coverage trend into a single query.
@@ -882,19 +882,48 @@ func fingerprintStackWithFileLine(stack string, fileLineRe *regexp.Regexp) strin
 	return hex.EncodeToString(sum[:12])
 }
 
-func (s *Store) recomputeCrashFingerprints(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(stack, '') FROM crashes WHERE COALESCE(stack, '') <> ''`)
+func (s *Store) backfillCrashes(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			c.id,
+			COALESCE(c.stack, ''),
+			COALESCE(c.stack_fingerprint, ''),
+			COALESCE(c.blamed_module, ''),
+			COALESCE(c.minimized_input, ''),
+			COALESCE(OCTET_LENGTH(c.input_bytes), 0),
+			COALESCE(p.name, ''),
+			COALESCE(t.package, '')
+		FROM crashes c
+		LEFT JOIN targets t ON t.id = c.target_id
+		LEFT JOIN projects p ON p.id = t.project_id
+		WHERE COALESCE(c.stack, '') <> '' OR COALESCE(OCTET_LENGTH(c.input_bytes), 0) = 0
+	`)
 	if err != nil {
 		return err
 	}
 	type item struct {
-		id    int64
-		stack string
+		id             int64
+		stack          string
+		stackFP        string
+		blamedModule   string
+		minimizedInput string
+		inputLen       int
+		projectName    string
+		pkgImport      string
 	}
 	var items []item
 	for rows.Next() {
 		var it item
-		if err := rows.Scan(&it.id, &it.stack); err != nil {
+		if err := rows.Scan(
+			&it.id,
+			&it.stack,
+			&it.stackFP,
+			&it.blamedModule,
+			&it.minimizedInput,
+			&it.inputLen,
+			&it.projectName,
+			&it.pkgImport,
+		); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -907,15 +936,79 @@ func (s *Store) recomputeCrashFingerprints(ctx context.Context) error {
 	_ = rows.Close()
 
 	for _, it := range items {
-		fp := FingerprintStack(it.stack)
+		modRoot := DeriveModuleRoot(it.projectName, it.pkgImport)
+		scrubbed := ScrubStack(it.stack, "", modRoot, "")
+		fp := FingerprintStack(scrubbed)
 		if fp == "" {
+			fp = it.stackFP
+		}
+		var attr StackAttribution
+		if it.blamedModule == "" && scrubbed != "" {
+			attr = AttributeStack(scrubbed, "", modRoot)
+		}
+		var backfilledInput []byte
+		var backfilledTrunc bool
+		if it.inputLen == 0 && isSafeBackfillInputPath(it.minimizedInput) {
+			if raw, readErr := os.ReadFile(it.minimizedInput); readErr == nil && len(raw) > 0 {
+				if len(raw) > MaxCrashInputBytes {
+					backfilledInput = append([]byte(nil), raw[:MaxCrashInputBytes]...)
+					backfilledTrunc = true
+				} else {
+					backfilledInput = raw
+				}
+			}
+		}
+
+		stackChanged := scrubbed != it.stack || fp != it.stackFP
+		if !stackChanged && attr.Module == "" && len(backfilledInput) == 0 {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE crashes SET stack_fingerprint = ? WHERE id = ?`, fp, it.id); err != nil {
-			return err
+
+		if stackChanged || attr.Module != "" {
+			if attr.Module != "" {
+				if _, err := s.db.ExecContext(ctx,
+					`UPDATE crashes SET stack = ?, stack_fingerprint = ?, blamed_module = ?, blamed_version = ?, blamed_file = ?, blamed_line = ? WHERE id = ?`,
+					scrubbed, fp, attr.Module, attr.Version, attr.File, attr.Line, it.id,
+				); err != nil {
+					return err
+				}
+			} else {
+				if _, err := s.db.ExecContext(ctx,
+					`UPDATE crashes SET stack = ?, stack_fingerprint = ? WHERE id = ?`,
+					scrubbed, fp, it.id,
+				); err != nil {
+					return err
+				}
+			}
+		}
+		if len(backfilledInput) > 0 {
+			if _, err := s.db.ExecContext(ctx,
+				`UPDATE crashes SET input_bytes = ?, input_truncated = ? WHERE id = ?`,
+				backfilledInput, backfilledTrunc, it.id,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func isSafeBackfillInputPath(p string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" || p == "inline-failure" {
+		return false
+	}
+	for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." {
+			return false
+		}
+	}
+	slashPath := strings.ReplaceAll(p, "\\", "/")
+	if !strings.Contains(slashPath, "/crashes/") && !strings.HasPrefix(slashPath, "crashes/") && !strings.Contains(slashPath, "/testdata/fuzz/") {
+		return false
+	}
+	info, err := os.Lstat(p)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func sanitizeUTF8(s string) string {

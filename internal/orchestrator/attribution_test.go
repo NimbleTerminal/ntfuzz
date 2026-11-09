@@ -6,26 +6,39 @@ import (
 	"testing"
 )
 
-const nt3dMotivatingStack = `panic: runtime error: slice bounds out of range [::-1]
-github.com/qmuntal/gltf.(*Decoder).decodeBuffer
-    /var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:151
-github.com/qmuntal/gltf.(*Decoder).Decode
-    /var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:74
-nimbleterminal.dev/nt3d/mesh/gltf.Decode
-    /var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf.go:108`
+const nt3dMotivatingStack = `--- FAIL: FuzzDecode (0.04s)
+    --- FAIL: FuzzDecode (0.00s)
+        testing.go:2078: panic: runtime error: slice bounds out of range [::-1]
+        goroutine 22 [running]:
+        testing.tRunner.func1.2({0x6d9960, 0xc00018a018})
+        	/usr/local/go/src/testing/testing.go:1967 +0x219
+        testing.tRunner.func1()
+        	/usr/local/go/src/testing/testing.go:1970 +0x35b
+        panic({0x6d9960?, 0xc00018a018?})
+        	/usr/local/go/src/runtime/panic.go:792 +0x132
+        github.com/qmuntal/gltf.(*Decoder).decodeBuffer(0xc0001a2000, 0x0)
+        	/var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:151 +0x359
+        github.com/qmuntal/gltf.(*Decoder).Decode(0xc0001a2000, 0xc00019c000)
+        	/var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:74 +0x165
+        nimbleterminal.dev/nt3d/mesh/gltf.Decode({0x7f9a040d5088?, 0xc000182048?})
+        	/var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf.go:108 +0x9f
+        nimbleterminal.dev/nt3d/mesh/gltf.FuzzDecode.func1(0xc000184380, {0xc000188000, 0x3b, 0x40})
+        	/var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf_test.go:24 +0x75`
 
-const nt3dLocalPanicStack = `panic: runtime error: index out of range [2] with length 2
-goroutine 19 [running]:
-runtime/debug.Stack()
-	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
-testing.tRunner.func1()
-	/usr/local/go/src/testing/testing.go:1632 +0x230
-panic({0x1029a4b60?, 0x14000192048?})
-	/usr/local/go/src/runtime/panic.go:785 +0x124
-nimbleterminal.dev/nt3d/mesh/gltf.Decode(0x14000180000)
-	/var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf.go:42 +0x9c
-nimbleterminal.dev/nt3d/mesh/gltf.FuzzDecode.func1(0x1400015c1a0, {0x14000190000, 0x10, 0x10})
-	/var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf_test.go:19 +0x58`
+const nt3dLocalPanicStack = `--- FAIL: FuzzDecode (0.01s)
+    --- FAIL: FuzzDecode (0.00s)
+        testing.go:2078: panic: runtime error: index out of range [2] with length 2
+        goroutine 19 [running]:
+        runtime/debug.Stack()
+        	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+        testing.tRunner.func1()
+        	/usr/local/go/src/testing/testing.go:1632 +0x230
+        panic({0x1029a4b60?, 0x14000192048?})
+        	/usr/local/go/src/runtime/panic.go:785 +0x124
+        nimbleterminal.dev/nt3d/mesh/gltf.Decode(0x14000180000)
+        	/var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf.go:42 +0x9c
+        nimbleterminal.dev/nt3d/mesh/gltf.FuzzDecode.func1(0x1400015c1a0, {0x14000190000, 0x10, 0x10})
+        	/var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf_test.go:19 +0x58`
 
 func TestAttributeStack(t *testing.T) {
 	tests := []struct {
@@ -40,6 +53,18 @@ func TestAttributeStack(t *testing.T) {
 			stack:         nt3dMotivatingStack,
 			repoDir:       "/var/lib/ntfuzz/.ntfuzz/repos/nt3d",
 			projectModule: "nimbleterminal.dev/nt3d",
+			want: StackAttribution{
+				Module:  "github.com/qmuntal/gltf",
+				Version: "v0.29.0",
+				File:    "decoder.go",
+				Line:    151,
+			},
+		},
+		{
+			name:          "motivating nt3d crash without repoDir (backfill/render mode) blames dependency",
+			stack:         nt3dMotivatingStack,
+			repoDir:       "",
+			projectModule: "nimbleterminal.dev/nt3d/mesh/gltf",
 			want: StackAttribution{
 				Module:  "github.com/qmuntal/gltf",
 				Version: "v0.29.0",
@@ -137,6 +162,26 @@ func TestScrubStackAndFingerprintInvariance(t *testing.T) {
 	}
 	if FingerprintStack(nt3dLocalPanicStack) != FingerprintStack(scrubbedLocal) {
 		t.Fatalf("FingerprintStack changed on project-local panic stack")
+	}
+
+	// Verify render-time/backfill scrubbing without repoDir or goModCache still scrubs /var/lib/ntfuzz/... paths.
+	scrubbedRender := ScrubStack(nt3dMotivatingStack, "", DeriveModuleRoot("nt3d", "nimbleterminal.dev/nt3d/mesh/gltf"), "")
+	if strings.Contains(scrubbedRender, "/var/lib/ntfuzz") {
+		t.Fatalf("render-time ScrubStack left /var/lib/ntfuzz path in stack:\n%s", scrubbedRender)
+	}
+	if !strings.Contains(scrubbedRender, "github.com/qmuntal/gltf@v0.29.0/decoder.go:151") ||
+		!strings.Contains(scrubbedRender, "nimbleterminal.dev/nt3d/mesh/gltf/gltf.go:108") {
+		t.Fatalf("render-time ScrubStack missing normalized paths:\n%s", scrubbedRender)
+	}
+
+	if !HasProjectFrame(nt3dLocalPanicStack, "", "nimbleterminal.dev/nt3d") {
+		t.Fatal("expected HasProjectFrame=true for nt3dLocalPanicStack")
+	}
+	if HasProjectFrame(nt3dMotivatingStack, "", "nimbleterminal.dev/nt3d") {
+		t.Fatal("expected HasProjectFrame=false for dependency crash nt3dMotivatingStack")
+	}
+	if HasProjectFrame("--- FAIL: FuzzDecode (0.04s)\n    testing.go:2078: panic: boom", "", "nimbleterminal.dev/nt3d") {
+		t.Fatal("expected HasProjectFrame=false when only testing.go log prefix is present")
 	}
 }
 

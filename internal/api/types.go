@@ -194,6 +194,20 @@ type Crash struct {
 
 // CrashFromStore converts a store.Crash into an API Crash DTO.
 func CrashFromStore(c store.Crash) Crash {
+	modRoot := orchestrator.DeriveModuleRoot(c.ProjectName, c.Package)
+	scrubbedStack := orchestrator.ScrubStack(c.Stack, "", modRoot, "")
+	blamedMod := c.BlamedModule
+	blamedVer := c.BlamedVersion
+	blamedFile := c.BlamedFile
+	blamedLine := c.BlamedLine
+	if blamedMod == "" && scrubbedStack != "" {
+		if attr := orchestrator.AttributeStack(scrubbedStack, "", modRoot); attr.Module != "" {
+			blamedMod = attr.Module
+			blamedVer = attr.Version
+			blamedFile = attr.File
+			blamedLine = attr.Line
+		}
+	}
 	return Crash{
 		ID:               c.ID,
 		TargetID:         c.TargetID,
@@ -204,7 +218,7 @@ func CrashFromStore(c store.Crash) Crash {
 		FirstSeen:        c.FirstSeen,
 		LastSeen:         c.LastSeen,
 		FixedAt:          c.FixedAt,
-		Stack:            c.Stack,
+		Stack:            scrubbedStack,
 		StackFingerprint: c.StackFingerprint,
 		InputHash:        c.InputHash,
 		MinimizedInput:   c.MinimizedInput,
@@ -213,11 +227,11 @@ func CrashFromStore(c store.Crash) Crash {
 		GitSHA:           c.GitSHA,
 		Dirty:            c.Dirty,
 		GoVersion:        c.GoVersion,
-		BlamedModule:     c.BlamedModule,
-		BlamedVersion:    c.BlamedVersion,
-		BlamedFile:       c.BlamedFile,
-		BlamedLine:       c.BlamedLine,
-		BlamedURL:        orchestrator.DependencySourceURL(c.BlamedModule, c.BlamedVersion, c.BlamedFile, c.BlamedLine),
+		BlamedModule:     blamedMod,
+		BlamedVersion:    blamedVer,
+		BlamedFile:       blamedFile,
+		BlamedLine:       blamedLine,
+		BlamedURL:        orchestrator.DependencySourceURL(blamedMod, blamedVer, blamedFile, blamedLine),
 		ReplayStatus:     c.ReplayStatus,
 		ReplayGitSHA:     c.ReplayGitSHA,
 		ReplayCheckedAt:  c.ReplayCheckedAt,

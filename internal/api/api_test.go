@@ -281,19 +281,27 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 	}
 
 	corpusData := []byte("go test fuzz v1\n[]byte(\"glTF\\x02\\x00\\x00\\x00\\xff\\xff\")\n")
-	scrubbedStack := "panic: runtime error: slice bounds out of range [::-1]\n" +
-		"github.com/qmuntal/gltf.(*Decoder).decodeBuffer\n" +
-		"    github.com/qmuntal/gltf@v0.29.0/decoder.go:151\n" +
-		"github.com/qmuntal/gltf.(*Decoder).Decode\n" +
-		"    github.com/qmuntal/gltf@v0.29.0/decoder.go:74\n" +
-		"nimbleterminal.dev/nt3d/mesh/gltf.Decode\n" +
-		"    nimbleterminal.dev/nt3d/mesh/gltf/gltf.go:108"
+	rawCrash23Stack := "--- FAIL: FuzzDecode (0.04s)\n" +
+		"    --- FAIL: FuzzDecode (0.00s)\n" +
+		"        testing.go:2078: panic: runtime error: slice bounds out of range [::-1]\n" +
+		"        goroutine 22 [running]:\n" +
+		"        testing.tRunner.func1.2({0x6d9960, 0xc00018a018})\n" +
+		"        \t/usr/local/go/src/testing/testing.go:1967 +0x219\n" +
+		"        panic({0x6d9960?, 0xc00018a018?})\n" +
+		"        \t/usr/local/go/src/runtime/panic.go:792 +0x132\n" +
+		"        github.com/qmuntal/gltf.(*Decoder).decodeBuffer(0xc0001a2000, 0x0)\n" +
+		"        \t/var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:151 +0x359\n" +
+		"        github.com/qmuntal/gltf.(*Decoder).Decode(0xc0001a2000, 0xc00019c000)\n" +
+		"        \t/var/lib/ntfuzz/.cache/go-mod/github.com/qmuntal/gltf@v0.29.0/decoder.go:74 +0x165\n" +
+		"        nimbleterminal.dev/nt3d/mesh/gltf.Decode({0x7f9a040d5088?, 0xc000182048?})\n" +
+		"        \t/var/lib/ntfuzz/.ntfuzz/repos/nt3d/mesh/gltf/gltf.go:108 +0x9f"
 
+	// Insert with raw /var/lib/ntfuzz/... stack and empty BlamedModule to verify render-time scrubbing and attribution.
 	pubCrashID, err := st.RecordCrash(ctx, store.Crash{
 		TargetID:         tPublicID,
 		FirstSeen:        now.Add(-time.Hour),
 		LastSeen:         now,
-		Stack:            scrubbedStack,
+		Stack:            rawCrash23Stack,
 		StackFingerprint: "aabbccddeeff001122334455",
 		InputHash:        "deadbeefcafebabe0123456789abcdef",
 		MinimizedInput:   ".ntfuzz/corpus/nt3d/crashes/FuzzDecode/deadbeefcafebabe0123456789abcdef",
@@ -301,10 +309,6 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 		GitSHA:           "9a8b7c6d5e4f",
 		Dirty:            false,
 		GoVersion:        "go1.25.0",
-		BlamedModule:     "github.com/qmuntal/gltf",
-		BlamedVersion:    "v0.29.0",
-		BlamedFile:       "decoder.go",
-		BlamedLine:       151,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -443,6 +447,9 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 			advisoryURL,
 			"github.com/qmuntal/gltf@v0.29.0",
 			"https://github.com/qmuntal/gltf/blob/v0.29.0/decoder.go#L151",
+			"<!--email_off-->",
+			"<!--/email_off-->",
+			"<h2>Stack Trace</h2>",
 			fmt.Sprintf("/api/crashes/%d/input", pubCrashID),
 			`href="/"`,
 			"go test ./mesh/gltf -run &#39;FuzzDecode/deadbeefcafebabe0123456789abcdef&#39;",
@@ -450,6 +457,9 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 			if !strings.Contains(page, wantToken) {
 				t.Errorf("%s HTML page missing %q:\n%s", modeName, wantToken, page)
 			}
+		}
+		if strings.Contains(page, "/var/lib/ntfuzz") {
+			t.Errorf("%s HTML page leaked server-local /var/lib/ntfuzz path:\n%s", modeName, page)
 		}
 	}
 
@@ -462,6 +472,7 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 		fmt.Sprintf("# Crash #%d: nt3d FuzzDecode", pubCrashID),
 		"[`github.com/qmuntal/gltf@v0.29.0`](https://github.com/qmuntal/gltf/blob/v0.29.0/decoder.go#L151)",
 		"github.com/qmuntal/gltf@v0.29.0/decoder.go:151",
+		"nimbleterminal.dev/nt3d/mesh/gltf/gltf.go:108",
 		"go1.25.0",
 		"9a8b7c6d5e4f",
 		fmt.Sprintf("https://fuzz.nimbleterminal.com/crashes/%d", pubCrashID),
@@ -473,8 +484,23 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 			t.Errorf("Markdown report missing %q:\n%s", wantMD, md)
 		}
 	}
+	if strings.Contains(md, "/var/lib/ntfuzz") {
+		t.Errorf("Markdown report leaked /var/lib/ntfuzz path:\n%s", md)
+	}
 
-	// Reject injected public_url values (newlines, non-http schemes, markdown delimiters) and ignore poisoned Host/X-Forwarded-Proto.
+	// Verify empty blame with no recognizable project frame renders as "not attributed" instead of "project code".
+	unattribMD := FormatCrashReportMarkdown(Crash{
+		ID:          99,
+		ProjectName: "nt3d",
+		Package:     "nimbleterminal.dev/nt3d/mesh/gltf",
+		TargetName:  "FuzzDecode",
+		Stack:       "--- FAIL: FuzzDecode (0.04s)\n    testing.go:2078: panic: boom",
+	}, nil, "", false)
+	if !strings.Contains(unattribMD, "- **Blamed Component:** not attributed") {
+		t.Fatalf("expected unattributed crash report to say 'not attributed', got:\n%s", unattribMD)
+	}
+
+	// Reject injected public_url values (newlines, non-http schemes, markdown delimiters).
 	badReportResp, err := http.Get(fmt.Sprintf("%s/api/crashes/%d/report.md?public_url=https://evil.example%%0a%%0ainjected", snapSrv.URL, pubCrashID))
 	if err != nil {
 		t.Fatal(err)
@@ -484,11 +510,12 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 		t.Fatalf("expected 400 Bad Request for newline-injected public_url, got %d", badReportResp.StatusCode)
 	}
 
+	// When public_url is omitted, derive base URL from validated request Host + X-Forwarded-Proto.
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/crashes/%d/report.md", snapSrv.URL, pubCrashID), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Host = "evil.example.invalid"
+	req.Host = "fuzz.nimbleterminal.com"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	hostResp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -496,8 +523,24 @@ func TestCrashSharePermalinkInputIssueAndReport(t *testing.T) {
 	}
 	hostBody, _ := io.ReadAll(hostResp.Body)
 	_ = hostResp.Body.Close()
-	if strings.Contains(string(hostBody), "evil.example.invalid") {
-		t.Fatalf("did not expect untrusted Host header to be reflected into report.md:\n%s", string(hostBody))
+	if !strings.Contains(string(hostBody), fmt.Sprintf("https://fuzz.nimbleterminal.com/crashes/%d", pubCrashID)) {
+		t.Fatalf("expected Host + X-Forwarded-Proto to derive https://fuzz.nimbleterminal.com/crashes/%d:\n%s", pubCrashID, string(hostBody))
+	}
+
+	// Malformed Host header containing Markdown delimiters falls back to relative URL.
+	badHostReq, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/crashes/%d/report.md", snapSrv.URL, pubCrashID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badHostReq.Host = "evil.example/)[injected](https://bad.example"
+	badHostResp, err := http.DefaultClient.Do(badHostReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badHostBody, _ := io.ReadAll(badHostResp.Body)
+	_ = badHostResp.Body.Close()
+	if strings.Contains(string(badHostBody), "evil.example") {
+		t.Fatalf("did not expect malformed Host header to be reflected into report.md:\n%s", string(badHostBody))
 	}
 }
 
