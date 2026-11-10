@@ -12,3 +12,6 @@
 *.pem
 *.key
 .DS_Store
+/docs/hugo/public/
+/docs/hugo/resources/
+/docs/hugo/.hugo_build.lock

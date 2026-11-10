@@ -10,6 +10,9 @@
 
 `ntfuzz` (`nimbleterminal.dev/ntfuzz`) is a single-binary continuous fuzzing orchestrator for Go repositories, backed by **DuckDB** ([`duckdb-go/v2`](https://github.com/duckdb/duckdb-go) and [`ntduckbox`](https://github.com/NimbleTerminal/ntduckbox)) and a **[Bubble Tea v2](https://github.com/charmbracelet/bubbletea)** TUI dashboard served both natively in your terminal and in the browser via **Booba** ([`nimbleterminal.dev/booba`](https://github.com/NimbleTerminal/booba) + Ghostty/[`ntwebterm`](https://github.com/NimbleTerminal/ntwebterm)).
 
+- **[Guide](https://nimbleterminal.com/ntfuzz/)**: installation, configuration, commands, HTTP API reference, crash sharing and dependency attribution, and deployment.
+- **[Live Dashboard](https://fuzz.nimbleterminal.com/)**: public read-only snapshot viewer for the NimbleTerminal Go fleet.
+
 ---
 
 ## Features
