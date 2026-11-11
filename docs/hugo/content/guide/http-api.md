@@ -12,7 +12,7 @@ Both `ntfuzz serve` and `ntfuzz view` serve the same read-only JSON, HTML, and M
 | Method & Path | Modes | Content-Type | Description |
 | --- | --- | --- | --- |
 | `GET /` | `serve`, `view` | `text/html` | Interactive Booba / Ghostty browser TUI dashboard with server-rendered discovery links. |
-| `GET /api/status` | `serve`, `view` | `application/json` | Fleet health (`ok`, `crash`, `error`, `idle`, or `snapshot`), 24h run counts, open/reported crash counts, schema version, `read_only`, `snapshot_at`, and active worker jobs. |
+| `GET /api/status` | `serve`, `view` | `application/json` | Binary `version`, fleet health (`ok`, `crash`, `error`, `idle`, or `snapshot`), 24h run counts, open/reported crash counts, schema version, `read_only`, `snapshot_at`, and active worker jobs. |
 | `GET /api/projects` | `serve`, `view` | `application/json` | Configured projects with `id`, `name`, `repo`, `branch`, `public_inputs`, `git_sha`, `dirty`, `go_version`, `last_synced`, `sync_error`, target count, and open crash counts. |
 | `GET /api/targets` | `serve`, `view` | `application/json` | Active fuzz targets with latest run metrics, `corpus_count`, `coverage_pct`, 10-point `coverage_trend`, `open_crashes`, and `total_runs`. |
 | `GET /api/runs` | `serve`, `view` | `application/json` | Recent fuzz runs (newest first) with `execs`, `execs_per_sec`, `new_interesting`, `corpus_count`, `coverage_pct`, `status`, `git_sha`, `dirty`, `go_version`, and redacted `diagnostic` on failed runs. |

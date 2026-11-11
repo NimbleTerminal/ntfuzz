@@ -2,6 +2,8 @@ version: '3'
 
 vars:
   BINARY: bin/ntfuzz
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
   CONFIG: configs/projects.yaml
   DB: ntfuzz.duckdb
   LISTEN: 127.0.0.1:8080
@@ -16,7 +18,7 @@ tasks:
     desc: Build the single-binary ntfuzz executable
     cmds:
       - mkdir -p bin
-      - go build -o {{.BINARY}} ./cmd/ntfuzz
+      - go build -ldflags "-X main.version={{.VERSION}}" -o {{.BINARY}} ./cmd/ntfuzz
 
   test:
     desc: Run all fast unit and integration tests

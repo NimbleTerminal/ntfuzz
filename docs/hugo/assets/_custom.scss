@@ -115,6 +115,9 @@ h4,
 
 // The wordmark: red "ntfuzz" and its glyph.
 .book-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
   font-size: 1.75rem;
   line-height: 1;
   a {
@@ -125,6 +128,15 @@ h4,
     span {
       color: var(--wordmark-glyph);
       padding-left: 0.3em;
+    }
+  }
+  .book-version {
+    font-family: "Nimble Body", system-ui, sans-serif;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--gray-500);
+    &:hover {
+      color: var(--color-link);
     }
   }
 }

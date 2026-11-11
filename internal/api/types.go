@@ -295,6 +295,7 @@ func ActiveJobFromOrchestrator(j orchestrator.ActiveJob) ActiveJob {
 
 // StatusResponse is returned by GET /api/status.
 type StatusResponse struct {
+	Version       string      `json:"version"`
 	ReadOnly      bool        `json:"read_only"`
 	SnapshotAt    *time.Time  `json:"snapshot_at,omitempty"`
 	FleetHealth   string      `json:"fleet_health"`

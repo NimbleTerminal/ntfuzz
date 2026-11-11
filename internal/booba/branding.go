@@ -11,6 +11,8 @@ import (
 	"unicode"
 
 	"github.com/spf13/pflag"
+
+	"nimbleterminal.dev/ntfuzz/internal/version"
 )
 
 const (
@@ -140,8 +142,9 @@ func validateHexColor(raw string) (string, error) {
 }
 
 const (
-	defaultTopbarTag = `<header class="topbar">`
-	defaultWordmark  = `<a class="brand-wordmark" href="https://github.com/NimbleTerminal/ntfuzz" target="_blank" rel="noopener noreferrer">NTFUZZ</a>`
+	defaultTopbarTag  = `<header class="topbar">`
+	defaultWordmark   = `<a class="brand-wordmark" href="https://github.com/NimbleTerminal/ntfuzz" target="_blank" rel="noopener noreferrer">NTFUZZ</a>`
+	defaultVersionTag = `<span class="brand-version">dev</span>`
 )
 
 // RenderIndexHTML validates branding and returns the rendered dashboard HTML page.
@@ -153,7 +156,12 @@ func RenderIndexHTML(b Branding) ([]byte, error) {
 		return nil, err
 	}
 
-	out := embeddedIndexHTML
+	out := bytes.Replace(
+		embeddedIndexHTML,
+		[]byte(defaultVersionTag),
+		[]byte(fmt.Sprintf(`<span class="brand-version">%s</span>`, html.EscapeString(version.Current()))),
+		1,
+	)
 
 	if clean.AccentColor != "" {
 		styledTopbar := fmt.Sprintf(`<header class="topbar" style="--ntfuzz-accent: %s;">`, html.EscapeString(clean.AccentColor))

@@ -8,6 +8,7 @@ enableGitInfo = false
 
 [params]
   description = "Continuous Go fuzzing orchestrator and dashboard backed by DuckDB and a Bubble Tea / Booba terminal UI"
+  BookVersion = "v0.2.0"
 
   # hugo-book theme params
   BookTheme = "auto"

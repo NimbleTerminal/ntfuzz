@@ -12,7 +12,32 @@ import (
 
 	"nimbleterminal.dev/ntfuzz/internal/api"
 	"nimbleterminal.dev/ntfuzz/internal/store"
+	versionpkg "nimbleterminal.dev/ntfuzz/internal/version"
 )
+
+func TestVersionFlagAndSubcommand(t *testing.T) {
+	origMain := version
+	origPkg := versionpkg.Version
+	t.Cleanup(func() {
+		version = origMain
+		versionpkg.Version = origPkg
+	})
+
+	version = "v0.2.0"
+
+	for _, args := range [][]string{{"--version"}, {"version"}} {
+		var out bytes.Buffer
+		cmd := newRootCmd()
+		cmd.SetOut(&out)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute(%v) failed: %v", args, err)
+		}
+		if got := out.String(); got != "ntfuzz v0.2.0\n" {
+			t.Fatalf("Execute(%v) = %q, want %q", args, got, "ntfuzz v0.2.0\n")
+		}
+	}
+}
 
 func TestServeAndViewMetricsFlagsDefaultsAndValidation(t *testing.T) {
 	serveCmd := newServeCmd()

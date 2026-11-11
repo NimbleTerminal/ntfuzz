@@ -14,6 +14,7 @@ import (
 	"nimbleterminal.dev/ntfuzz/internal/metrics"
 	"nimbleterminal.dev/ntfuzz/internal/orchestrator"
 	"nimbleterminal.dev/ntfuzz/internal/store"
+	"nimbleterminal.dev/ntfuzz/internal/version"
 )
 
 // WorkerStatusProvider reports current orchestrator worker activity.
@@ -271,6 +272,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := StatusResponse{
+		Version:       version.Current(),
 		FleetHealth:   health,
 		OpenCrashes:   stats.OpenCrashes,
 		RunsLast24h:   stats.RunsLast24h,

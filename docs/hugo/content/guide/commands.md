@@ -5,12 +5,13 @@ weight: 30
 
 # Commands
 
-The `ntfuzz` binary provides four subcommands:
+The `ntfuzz` binary provides five subcommands (plus `ntfuzz --version` / `-v`):
 
 - [`ntfuzz serve`](#ntfuzz-serve) — the single-writer fuzzing orchestrator, DuckDB store, local operator HTTP API, and Booba browser TUI.
 - [`ntfuzz view`](#ntfuzz-view) — the sandboxed, read-only public snapshot viewer backed by `ntduckbox`.
 - [`ntfuzz tui`](#ntfuzz-tui) — the native terminal Bubble Tea dashboard client.
 - [`ntfuzz crash`](#ntfuzz-crash) — the CLI for listing, linking, reporting, and resolving crashes over the HTTP API.
+- [`ntfuzz version`](#ntfuzz-version) — print the `ntfuzz` binary version (`ntfuzz <version>`).
 
 ## `serve` vs. `view`
 
@@ -161,3 +162,14 @@ ntfuzz crash fixed 23 --issue https://github.com/qmuntal/gltf/issues/123
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--issue` | `""` | Optional `http://` or `https://` issue URL to record on the crash. |
+
+---
+
+## `ntfuzz version`
+
+Print the `ntfuzz` version string (stamped via `-ldflags "-X main.version=..."` during `task build`, or read from Go module build info when installed via `go install`).
+
+```sh
+ntfuzz version
+ntfuzz --version
+```

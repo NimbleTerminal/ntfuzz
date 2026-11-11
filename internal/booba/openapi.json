@@ -1079,6 +1079,10 @@
       "StatusResponse": {
         "type": "object",
         "properties": {
+          "version": {
+            "type": "string",
+            "description": "Running ntfuzz binary version."
+          },
           "read_only": {
             "type": "boolean"
           },
@@ -1138,6 +1142,7 @@
           }
         },
         "required": [
+          "version",
           "read_only",
           "fleet_health",
           "open_crashes",

@@ -21,6 +21,7 @@ import (
 	"nimbleterminal.dev/booba/actions/bubblehelp"
 
 	"nimbleterminal.dev/ntfuzz/internal/api"
+	"nimbleterminal.dev/ntfuzz/internal/version"
 )
 
 type tickMsg time.Time
@@ -933,15 +934,16 @@ func (m Model) renderHeader() string {
 	if m.client != nil {
 		apiURL = m.client.BaseURL()
 	}
+	ver := nonEmpty(m.status.Version, version.Current())
 	title := titleStyle.Render(" NTFUZZ ")
 	if m.readOnly {
-		label := "Public snapshot • read-only"
+		label := ver + " • Public snapshot • read-only"
 		if m.status.SnapshotAt != nil {
 			label += " • " + m.status.SnapshotAt.UTC().Format("2006-01-02 15:04:05 UTC")
 		}
 		return lipgloss.NewStyle().Width(max(1, m.width)).Render(lipgloss.JoinHorizontal(lipgloss.Center, title, subtitleStyle.Render(label)))
 	}
-	sub := subtitleStyle.Render(fmt.Sprintf("Continuous Go Fuzzing Orchestrator • API %s", apiURL))
+	sub := subtitleStyle.Render(fmt.Sprintf("%s • Continuous Go Fuzzing Orchestrator • API %s", ver, apiURL))
 	if !m.lastUpdated.IsZero() {
 		sub += subtleTextStyle.Render(fmt.Sprintf(" • synced %s", m.lastUpdated.Format("15:04:05")))
 	}

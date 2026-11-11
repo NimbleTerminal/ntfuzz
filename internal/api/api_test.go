@@ -114,7 +114,7 @@ func TestAPIServerAndClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStatus: %v", err)
 	}
-	if status.OpenCrashes != 1 || status.RunsLast24h != 1 || status.ActiveWorkers != 1 || status.SchemaVersion != store.CurrentSchemaVersion {
+	if status.Version == "" || status.OpenCrashes != 1 || status.RunsLast24h != 1 || status.ActiveWorkers != 1 || status.SchemaVersion != store.CurrentSchemaVersion {
 		t.Fatalf("unexpected status: %+v", status)
 	}
 

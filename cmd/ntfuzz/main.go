@@ -21,19 +21,45 @@ import (
 	"nimbleterminal.dev/ntfuzz/internal/orchestrator"
 	"nimbleterminal.dev/ntfuzz/internal/store"
 	"nimbleterminal.dev/ntfuzz/internal/tui"
+	versionpkg "nimbleterminal.dev/ntfuzz/internal/version"
 )
 
+var version = "dev"
+
+func effectiveVersion() string {
+	if v := strings.TrimSpace(version); v != "" && v != "dev" {
+		versionpkg.Version = v
+	}
+	return versionpkg.Current()
+}
+
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func newRootCmd() *cobra.Command {
+	v := effectiveVersion()
 	rootCmd := &cobra.Command{
 		Use:          "ntfuzz",
 		Short:        "Continuous Go fuzzing orchestrator with DuckDB store and Booba/Bubble Tea TUI",
+		Version:      v,
 		SilenceUsage: true,
 	}
+	rootCmd.SetVersionTemplate("ntfuzz {{.Version}}\n")
+	rootCmd.AddCommand(newServeCmd(), newViewCmd(), newTUICmd(), newCrashCmd(), newVersionCmd())
+	return rootCmd
+}
 
-	rootCmd.AddCommand(newServeCmd(), newViewCmd(), newTUICmd(), newCrashCmd())
-
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+func newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the ntfuzz version",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, _ []string) {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "ntfuzz %s\n", effectiveVersion())
+		},
 	}
 }
 
@@ -142,6 +168,7 @@ func newServeCmd() *cobra.Command {
 			apiServer := api.NewServer(st, orch)
 			logger.Info("serving HTTP API (/api/*) and Booba Ghostty TUI",
 				"component", "serve",
+				"version", effectiveVersion(),
 				"listen", listenAddr,
 				"url", fmt.Sprintf("http://%s/", listenAddr),
 				"metrics_listen", metricsAddr,
