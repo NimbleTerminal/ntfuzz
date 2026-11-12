@@ -639,3 +639,67 @@ func TestPrivateRepoSyncRedactionEnvAndAuthHint(t *testing.T) {
 		}
 	})
 }
+
+func TestEnsureCheckoutCleansUntrackedFilesBeforePull(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	upstream := filepath.Join(tmp, "upstream")
+	if err := os.MkdirAll(upstream, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+	} {
+		if err := runGit(ctx, upstream, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(upstream, "go.mod"), []byte("module example.com/ntmediabox\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGit(ctx, upstream, "add", "go.mod"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGit(ctx, upstream, "commit", "-m", "initial without go.sum"); err != nil {
+		t.Fatal(err)
+	}
+
+	workDir := filepath.Join(tmp, "repos")
+	proj := ProjectConfig{
+		Name: "ntmediabox",
+		Repo: "file://" + filepath.ToSlash(upstream),
+	}
+	info1, err := EnsureCheckout(ctx, proj, workDir)
+	if err != nil {
+		t.Fatalf("initial EnsureCheckout: %v", err)
+	}
+
+	// Simulate `go test` generating an untracked go.sum in the managed clone,
+	// while upstream later commits a tracked go.sum.
+	if err := os.WriteFile(filepath.Join(info1.RepoDir, "go.sum"), []byte("untracked local sum\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upstream, "go.sum"), []byte("tracked upstream sum\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGit(ctx, upstream, "add", "go.sum"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGit(ctx, upstream, "commit", "-m", "add tracked go.sum"); err != nil {
+		t.Fatal(err)
+	}
+
+	info2, err := EnsureCheckout(ctx, proj, workDir)
+	if err != nil {
+		t.Fatalf("second EnsureCheckout should clean untracked go.sum and pull cleanly, got: %v", err)
+	}
+	if info2.GitSHA == info1.GitSHA || info2.Dirty {
+		t.Fatalf("expected clean updated revision, got sha=%s (was %s) dirty=%v", info2.GitSHA, info1.GitSHA, info2.Dirty)
+	}
+	gotSum, err := os.ReadFile(filepath.Join(info2.RepoDir, "go.sum"))
+	if err != nil || string(gotSum) != "tracked upstream sum\n" {
+		t.Fatalf("unexpected go.sum after pull: %q (err=%v)", gotSum, err)
+	}
+}

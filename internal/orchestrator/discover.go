@@ -68,17 +68,20 @@ func EnsureCheckout(ctx context.Context, proj ProjectConfig, workDir string) (Ch
 
 	gitDir := filepath.Join(dest, ".git")
 	if _, err := os.Stat(gitDir); err == nil {
+		// Managed remote clones under workDir should never retain untracked or modified
+		// files (such as go.sum or leftover test artifacts written by go test) that
+		// would block git checkout or git pull --ff-only.
+		_ = runGit(ctx, dest, "reset", "--hard")
+		_ = runGit(ctx, dest, "clean", "-fd")
 		if proj.Branch != "" {
 			if err := runGit(ctx, dest, "checkout", proj.Branch); err != nil {
 				sha, dirty := inspectGitRevision(ctx, dest)
-				return CheckoutInfo{RepoDir: dest, GitSHA: sha, Dirty: dirty, GoVersion: goVer},
-					fmt.Errorf("git checkout %s: %w", proj.Branch, err)
+				return CheckoutInfo{RepoDir: dest, GitSHA: sha, Dirty: dirty, GoVersion: goVer}, err
 			}
 		}
 		if err := runGit(ctx, dest, "pull", "--ff-only"); err != nil {
 			sha, dirty := inspectGitRevision(ctx, dest)
-			return CheckoutInfo{RepoDir: dest, GitSHA: sha, Dirty: dirty, GoVersion: goVer},
-				fmt.Errorf("git pull --ff-only: %w", err)
+			return CheckoutInfo{RepoDir: dest, GitSHA: sha, Dirty: dirty, GoVersion: goVer}, err
 		}
 		sha, dirty := inspectGitRevision(ctx, dest)
 		return CheckoutInfo{
@@ -95,7 +98,7 @@ func EnsureCheckout(ctx context.Context, proj ProjectConfig, workDir string) (Ch
 	}
 	args = append(args, repo, dest)
 	if err := runGit(ctx, "", args...); err != nil {
-		return CheckoutInfo{GoVersion: goVer}, fmt.Errorf("git clone %s: %w", RedactRepoURL(repo), err)
+		return CheckoutInfo{GoVersion: goVer}, err
 	}
 
 	sha, dirty := inspectGitRevision(ctx, dest)
