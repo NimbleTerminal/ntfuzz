@@ -72,6 +72,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/crashes/{id}", s.handleGetCrash)
 	s.mux.HandleFunc("GET /api/crashes/{id}/input", s.handleCrashInput)
 	s.mux.HandleFunc("GET /api/crashes/{id}/report.md", s.handleCrashReport)
+	s.mux.HandleFunc("GET /crashes", s.handleCrashIndexHTML)
+	s.mux.HandleFunc("GET /crashes/{$}", s.handleCrashIndexHTML)
 	s.mux.HandleFunc("GET /crashes/{id}", s.handleCrashHTML)
 	if s.snapshot == nil {
 		s.mux.HandleFunc("POST /api/crashes/{id}/fix", s.handleFixCrash)

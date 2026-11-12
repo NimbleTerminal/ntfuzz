@@ -128,6 +128,7 @@ func NewHandler(apiServer http.Handler, apiBaseURL string, opts BridgeOptions) (
 	})
 	if apiServer != nil {
 		mux.Handle("/api/", apiServer)
+		mux.Handle("/crashes", apiServer)
 		mux.Handle("/crashes/", apiServer)
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

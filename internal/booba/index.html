@@ -29,6 +29,31 @@
             display: flex;
             flex-direction: column;
         }
+        #dashboard-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip-path: inset(50%);
+            white-space: nowrap;
+            border: 0;
+        }
+        .skip-link:focus {
+            position: fixed;
+            z-index: 10;
+            top: 8px;
+            left: 8px;
+            width: auto;
+            height: auto;
+            margin: 0;
+            padding: 10px 14px;
+            clip-path: none;
+            background: #1e293b;
+            color: #7dd3fc;
+        }
         .topbar {
             --ntfuzz-accent: #38bdf8;
             display: flex;
@@ -146,10 +171,30 @@
             overflow: hidden;
         }
         #action-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
             background: #161f2c;
             border-top: 1px solid #2d3f56;
             padding: 6px 12px;
         }
+        #terminal-actions { flex: 1 1 auto; min-width: 0; }
+        .crash-reports-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            min-height: 44px;
+            padding: 6px 12px;
+            border: 1px solid var(--ntfuzz-accent, #38bdf8);
+            border-radius: 6px;
+            color: #7dd3fc;
+            text-decoration: none;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .crash-reports-link:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+        .crash-reports-short { display: none; }
         .api-links {
             flex-shrink: 0;
             padding: 6px 12px;
@@ -172,48 +217,71 @@
         }
         .booba-action:disabled { opacity: .45; }
         .booba-action:focus-visible { outline: 2px solid #38bdf8; outline-offset: -2px; }
-        .api-links summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; }
+        .api-links summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
         .api-links nav { padding-bottom: 6px; }
+        .api-links nav a { display: inline-flex; align-items: center; min-height: 36px; }
         .topbar, #action-controls, .api-links { flex-shrink: 0; }
         @media (max-width: 700px), (max-height: 500px) {
             .topbar { padding: 5px 10px; min-height: 36px; }
-            .brand-sub, #status-text { display: none; }
+            .brand-sub { display: none; }
             #terminal-container { padding: 3px; }
-            #action-controls { padding: 5px 6px; }
-            /* One scrollable row, not several rows taken away from the terminal. */
+            #action-controls { position: relative; min-height: 54px; padding: 5px 142px 5px 6px; gap: 6px; }
             #action-controls .booba-action-bar { flex-wrap: nowrap; overflow-x: auto; gap: 6px; scrollbar-width: thin; }
             #action-controls .booba-action-group { display: contents; }
             #action-controls .booba-action { flex: 0 0 auto; white-space: nowrap; }
-            #action-controls .booba-action--keyboard { margin-inline-start: 0; }
+            #action-controls .booba-action--toggle { position: absolute; top: 5px; right: 86px; margin: 0; background: #1e293b; }
+            #action-controls .booba-action--keyboard { position: absolute; top: 5px; right: 6px; margin: 0; background: #1e293b; }
+            .crash-reports-link { padding-inline: 10px; }
+            .crash-reports-full { display: none; }
+            .crash-reports-short { display: inline; }
             .api-links { padding: 0 10px; max-height: 30dvh; overflow-y: auto; }
-            .api-links summary { min-height: 44px; }
+        }
+        @media (max-width: 480px) {
+            .brand-operator, .brand-sep { display: none; }
+            .status { font-size: 11px; }
         }
     </style>
 </head>
 <body>
     <header class="topbar">
+        <a class="sr-only skip-link" href="/crashes">Skip terminal and open accessible crash reports</a>
         <div class="brand">
             <a class="brand-wordmark" href="https://github.com/NimbleTerminal/ntfuzz" target="_blank" rel="noopener noreferrer">NTFUZZ</a>
             <span class="brand-version">dev</span>
             <span class="brand-sub" id="program-summary">Ghostty / Booba Live TUI</span>
         </div>
-        <div class="status">
-            <span class="status-dot connecting" id="status-dot"></span>
+        <div class="status" role="status" aria-live="polite" aria-atomic="true">
+            <span class="status-dot connecting" id="status-dot" aria-hidden="true"></span>
             <span id="status-text">Connecting...</span>
         </div>
     </header>
-    <div id="terminal-container" aria-label="ntfuzz live terminal"></div>
-    <div id="action-controls"></div>
-    <details class="api-links">
-        <summary>Data &amp; API</summary>
-        <nav aria-label="Dashboard data">
-        <a href="/api/crashes?open=true">Open crashes</a> ·
-        <a href="/api/projects">Projects</a> ·
-        <a href="/api/status">Status</a> ·
-        <a href="/api/docs">API documentation</a> ·
-        <a href="/llms.txt">Agent guide</a>
-        </nav>
-    </details>
+    <main id="dashboard-content">
+        <section class="sr-only" aria-label="Fleet summary">
+            <h2>Fleet summary</h2>
+            <p id="accessible-summary">Dashboard loading.</p>
+            <a href="/crashes">Open crash reports as accessible HTML</a>
+        </section>
+        <div id="terminal-container" aria-label="ntfuzz live terminal" aria-describedby="accessible-summary"></div>
+        <div id="action-controls">
+            <a class="crash-reports-link" href="/crashes" aria-label="Crash reports">
+                <span class="crash-reports-full">Crash reports</span><span class="crash-reports-short">Reports</span>
+            </a>
+            <div id="terminal-actions"></div>
+        </div>
+    </main>
+    <footer>
+        <details class="api-links">
+            <summary>Data &amp; API</summary>
+            <nav aria-label="Dashboard data">
+            <a href="/crashes">Crash reports (HTML)</a> ·
+            <a href="/api/crashes?open=true">Open crashes (JSON)</a> ·
+            <a href="/api/projects">Projects</a> ·
+            <a href="/api/status">Status</a> ·
+            <a href="/api/docs">API documentation</a> ·
+            <a href="/llms.txt">Agent guide</a>
+            </nav>
+        </details>
+    </footer>
 
     <script type="module">
         import { BoobaTerminal, installActionBar, resolveBoobaURLs } from './static/booba/booba.js';
@@ -223,6 +291,7 @@
         const dot = document.getElementById('status-dot');
         const text = document.getElementById('status-text');
         const summaryEl = document.getElementById('program-summary');
+        const accessibleSummary = document.getElementById('accessible-summary');
 
         async function main() {
             const booba = new BoobaTerminal('terminal-container', {
@@ -247,6 +316,7 @@
             booba.onProgramStatus = (report) => {
                 if (report && report.message) {
                     summaryEl.textContent = report.message;
+                    accessibleSummary.textContent = report.message;
                 }
             };
 
@@ -260,7 +330,7 @@
             const viewport = installTerminalViewport({ root: document.body, fit: () => booba.fitAddon?.fit() });
             const keyboard = installTerminalKeyboard({ root: document.getElementById('terminal-container'), focus: () => booba.focus() });
             const disposeActions = installActionBar(booba.actions, {
-                parent: document.getElementById('action-controls'),
+                parent: document.getElementById('terminal-actions'),
                 openKeyboard: keyboard.openKeyboard,
                 onLayout: viewport.fit,
             });

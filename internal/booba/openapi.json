@@ -370,6 +370,24 @@
         }
       }
     },
+    "/crashes": {
+      "get": {
+        "summary": "Server-rendered HTML index of open crashes (no JavaScript required)",
+        "operationId": "getCrashIndexHTML",
+        "responses": {
+          "200": {
+            "description": "Server-rendered HTML crash index with report links",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/crashes/{id}": {
       "get": {
         "summary": "Server-rendered HTML crash permalink (no JavaScript required)",

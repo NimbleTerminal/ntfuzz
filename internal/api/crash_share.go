@@ -586,7 +586,7 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
 		corpusPreviewHTML = fmt.Sprintf(`
     <section class="panel">
       <h2>Corpus Input (<code>%s</code>)</h2>
-      <pre><code>%s</code></pre>
+      <pre tabindex="0"><code>%s</code></pre>
     </section>`, esc(c.InputHash), esc(strings.TrimRight(string(inputBytes), "\n")))
 	}
 
@@ -640,18 +640,23 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
       flex-wrap: wrap;
       gap: 12px;
     }
-    .brand { display: flex; align-items: center; gap: 10px; }
-    .wordmark { font-weight: 700; letter-spacing: 0.08em; color: var(--accent); text-decoration: none; }
+    .brand { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+    .wordmark { display: inline-flex; align-items: center; min-height: 44px; font-weight: 700; letter-spacing: 0.08em; color: var(--accent); text-decoration: none; }
     .mode-pill { font-size: 0.72rem; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 2px 7px; }
+    nav { display: flex; flex-wrap: wrap; gap: 2px 14px; }
     nav a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 44px;
       color: var(--accent);
       text-decoration: none;
-      margin-left: 14px;
       font-size: 0.9rem;
     }
     nav a:hover, a:hover { text-decoration: underline; }
-    h1 { font-size: 1.45rem; margin: 0 0 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    a:focus-visible, pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    h1 { font-size: 1.45rem; margin: 0 0 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; overflow-wrap: anywhere; }
     h2 { font-size: 1.05rem; margin: 0 0 12px; color: #f8fafc; }
+    main, .panel { min-width: 0; }
     .panel {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -675,7 +680,9 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
     .badge-project { background: rgba(56, 189, 248, 0.14); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.35); }
     .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
     .btn {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      min-height: 44px;
       padding: 6px 12px;
       border-radius: 6px;
       border: 1px solid var(--border);
@@ -696,6 +703,7 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
       padding: 8px 10px;
       border-bottom: 1px solid var(--border);
       vertical-align: top;
+      overflow-wrap: anywhere;
     }
     th { width: 180px; color: var(--muted); font-weight: 600; }
     code, pre {
@@ -706,8 +714,11 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
       background: var(--code-bg);
       padding: 2px 6px;
       border-radius: 4px;
+      overflow-wrap: anywhere;
     }
     pre {
+      max-width: 100%%;
+      min-width: 0;
       background: var(--code-bg);
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -715,10 +726,19 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
       overflow-x: auto;
       margin: 0;
     }
-    pre code { background: none; padding: 0; }
+    pre code { display: block; width: max-content; background: none; padding: 0; overflow-wrap: normal; }
     a { color: var(--accent); }
     .muted { color: var(--muted); }
     .replay-diag { margin-top: 6px; color: var(--muted); }
+    @media (max-width: 640px) {
+      body { padding: 14px 10px 40px; }
+      header { margin-bottom: 16px; }
+      .panel { padding: 14px 12px; }
+      table, tbody, tr, th, td { display: block; width: 100%%; }
+      th { padding: 8px 0 0; border: 0; }
+      td { padding: 2px 0 10px; }
+      pre { padding: 10px; }
+    }
   </style>
 </head>
 <body>
@@ -777,14 +797,14 @@ func renderCrashHTMLPage(c Crash, inputBytes []byte, hasInput, canServeInput, is
     <section class="panel">
       <h2>Stack Trace</h2>
       <!--email_off-->
-      <pre><code>%s</code></pre>
+      <pre tabindex="0"><code>%s</code></pre>
       <!--/email_off-->
     </section>
 
     <section class="panel">
       <h2>Reproduction</h2>
       <p class="muted" style="margin-top: 0;">Place the downloaded corpus input in <code>%s</code> and run:</p>
-      <pre><code>%s</code></pre>
+      <pre tabindex="0"><code>%s</code></pre>
     </section>
 %s
   </main>

@@ -67,11 +67,15 @@ func (m Model) compactStatsView() tea.View {
 	if project == "" {
 		project = "all repos"
 	}
-	header := fmt.Sprintf("NTFUZZ · %d open crashes", m.status.OpenCrashes)
+	header := "NTFUZZ · " + openCrashSummary(m.status.OpenCrashes)
 	if m.lastErr != nil {
 		header = "NTFUZZ · API warning (r: retry)"
 	}
-	lines := []string{header, m.currentStatsQuery().Title, m.currentStatsWindow() + " · " + project + " · " + m.graphicsLabel()}
+	lines := []string{header}
+	if status := m.compactDataStatus(); status != "" {
+		lines = append(lines, status)
+	}
+	lines = append(lines, m.currentStatsQuery().Title, m.currentStatsWindow()+" · "+project+" · "+m.graphicsLabel())
 	for i := range lines {
 		lines[i] = ansi.Truncate(lines[i], budget.Width, "…")
 	}
@@ -170,6 +174,25 @@ func (m Model) compactRevisionPages() []string {
 	return recordPages(records, budget.Width, max(1, budget.Rows-1))
 }
 
+func openCrashSummary(count int) string {
+	noun := "crashes"
+	if count == 1 {
+		noun = "crash"
+	}
+	return fmt.Sprintf("%d open %s", count, noun)
+}
+
+func (m Model) compactDataStatus() string {
+	if !m.readOnly && !m.status.ReadOnly {
+		return ""
+	}
+	status := "Snapshot · read-only"
+	if m.status.SnapshotAt != nil {
+		status += " · " + formatRelativeTime(*m.status.SnapshotAt)
+	}
+	return status
+}
+
 // Keep the landing screen useful on the same narrow grid as the graphs.
 func (m Model) compactFleetView() tea.View {
 	width := max(1, m.width)
@@ -177,7 +200,11 @@ func (m Model) compactFleetView() tea.View {
 	if filter == "" {
 		filter = "all repos"
 	}
-	lines := []string{fmt.Sprintf("NTFUZZ · %d open crashes", m.status.OpenCrashes), "Targets · " + filter}
+	lines := []string{"NTFUZZ · " + openCrashSummary(m.status.OpenCrashes)}
+	if status := m.compactDataStatus(); status != "" {
+		lines = append(lines, status)
+	}
+	lines = append(lines, "Targets · "+filter)
 	if m.lastErr != nil {
 		lines = append(lines, "API warning · r to retry")
 	}
@@ -208,6 +235,53 @@ func (m Model) compactFleetView() tea.View {
 		lines[i] = ansi.Truncate(lines[i], width, "…")
 	}
 	v := tea.NewView(strings.Join(lines, "\n"))
+	v.AltScreen = true
+	return v
+}
+
+func (m Model) compactCrashesView() tea.View {
+	width := max(1, m.width)
+	lines := []string{"NTFUZZ · " + openCrashSummary(len(m.openCrashes))}
+	if status := m.compactDataStatus(); status != "" {
+		lines = append(lines, status)
+	}
+	if len(m.openCrashes) == 0 {
+		lines = append(lines, "No open crashes in this data.", "c fleet · g graphs")
+	} else {
+		m.crashIdx = max(0, min(m.crashIdx, len(m.openCrashes)-1))
+		c := m.openCrashes[m.crashIdx]
+		state := "UNREPORTED"
+		if strings.TrimSpace(c.IssueURL) != "" {
+			state = "REPORTED"
+		}
+		lines = append(lines,
+			fmt.Sprintf("Crash %d/%d · #%d · %s", m.crashIdx+1, len(m.openCrashes), c.ID, state),
+			c.ProjectName+" / "+c.TargetName,
+		)
+		if c.BlamedModule != "" {
+			blame := "Blame: " + c.BlamedModule
+			if c.BlamedVersion != "" {
+				blame += "@" + c.BlamedVersion
+			}
+			if c.BlamedFile != "" {
+				blame += " · " + c.BlamedFile
+				if c.BlamedLine > 0 {
+					blame += fmt.Sprintf(":%d", c.BlamedLine)
+				}
+			}
+			lines = append(lines, blame)
+		}
+		if !c.LastSeen.IsZero() {
+			lines = append(lines, "Last seen: "+c.LastSeen.UTC().Format("2006-01-02 15:04 UTC"))
+		}
+		lines = append(lines,
+			"Report: "+fmt.Sprintf("/crashes/%d", c.ID),
+			"Stack: "+crashSummaryLine(c.Stack),
+			"Open the report with Crash reports below.",
+			"↑↓ crash · enter target · c fleet",
+		)
+	}
+	v := tea.NewView(ansi.Wrap(strings.Join(lines, "\n"), width, ""))
 	v.AltScreen = true
 	return v
 }

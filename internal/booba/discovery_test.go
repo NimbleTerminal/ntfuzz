@@ -76,7 +76,7 @@ func TestOpenAPIWireSchemas(t *testing.T) {
 	if err := json.Unmarshal(raw, &spec); err != nil {
 		t.Fatal(err)
 	}
-	if spec.OpenAPI != "3.0.3" || len(spec.Paths) != 12 {
+	if spec.OpenAPI != "3.0.3" || len(spec.Paths) != 13 {
 		t.Fatal("unexpected API document")
 	}
 	for _, path := range []string{
@@ -87,6 +87,7 @@ func TestOpenAPIWireSchemas(t *testing.T) {
 		"/api/crashes/{id}",
 		"/api/crashes/{id}/input",
 		"/api/crashes/{id}/report.md",
+		"/crashes",
 		"/crashes/{id}",
 		"/api/coverage/history",
 		"/api/stats/{query}",

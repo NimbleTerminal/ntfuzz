@@ -85,6 +85,16 @@ func TestBoobaBridgeHandler(t *testing.T) {
 	if respAPI.StatusCode != http.StatusOK || !strings.Contains(string(apiBody), "fleet_health") {
 		t.Fatalf("unexpected GET /api/status (%d): %s", respAPI.StatusCode, string(apiBody))
 	}
+
+	respCrashes, err := http.Get(ts.URL + "/crashes")
+	if err != nil {
+		t.Fatalf("GET /crashes: %v", err)
+	}
+	crashBody, _ := io.ReadAll(respCrashes.Body)
+	_ = respCrashes.Body.Close()
+	if respCrashes.StatusCode != http.StatusOK || !strings.Contains(string(crashBody), "<h1>Open crashes</h1>") {
+		t.Fatalf("unexpected GET /crashes (%d): %s", respCrashes.StatusCode, string(crashBody))
+	}
 }
 
 // Exercise a real PTY and the read-only mode's idle middleware: the terminal

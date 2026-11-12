@@ -267,8 +267,8 @@ func DescribeActions(inner tea.Model) bubblehelp.Description {
 	if m.status.ActiveWorkers > 0 {
 		state = "working"
 	}
-	summary := fmt.Sprintf("Fleet: %d projects, %d targets, %d open crashes",
-		m.status.TotalProjects, m.status.TotalTargets, m.status.OpenCrashes)
+	summary := fmt.Sprintf("Fleet: %d projects, %d targets, %s",
+		m.status.TotalProjects, m.status.TotalTargets, openCrashSummary(m.status.OpenCrashes))
 	if m.mode == ViewDetail && m.detailTarget != nil {
 		summary = fmt.Sprintf("Target %s/%s (%.1f%% cov, %d corpus)",
 			m.detailTarget.ProjectName, m.detailTarget.Name, m.detailTarget.CoveragePct, m.detailTarget.CorpusCount)
@@ -885,6 +885,9 @@ func (m *Model) syncDetailWidgets() {
 func (m Model) View() tea.View {
 	if m.mode == ViewFleet && (m.width < 80 || m.height < 24) {
 		return m.compactFleetView()
+	}
+	if m.mode == ViewCrashes && (m.width < 80 || m.height < 24) {
+		return m.compactCrashesView()
 	}
 	if m.compactStats() {
 		return m.compactStatsView()
