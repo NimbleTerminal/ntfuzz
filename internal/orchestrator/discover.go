@@ -68,11 +68,11 @@ func EnsureCheckout(ctx context.Context, proj ProjectConfig, workDir string) (Ch
 
 	gitDir := filepath.Join(dest, ".git")
 	if _, err := os.Stat(gitDir); err == nil {
-		// Managed remote clones under workDir should never retain untracked or modified
-		// files (such as go.sum or leftover test artifacts written by go test) that
-		// would block git checkout or git pull --ff-only.
+		// Managed remote clones under workDir should never retain untracked, ignored,
+		// or modified files (such as go.sum or leftover test artifacts written by go test)
+		// that would block git checkout or git pull --ff-only.
 		_ = runGit(ctx, dest, "reset", "--hard")
-		_ = runGit(ctx, dest, "clean", "-fd")
+		_ = runGit(ctx, dest, "clean", "-fdx")
 		if proj.Branch != "" {
 			if err := runGit(ctx, dest, "checkout", proj.Branch); err != nil {
 				sha, dirty := inspectGitRevision(ctx, dest)
