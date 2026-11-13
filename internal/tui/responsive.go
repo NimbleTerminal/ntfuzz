@@ -239,27 +239,95 @@ func (m Model) compactFleetView() tea.View {
 	return v
 }
 
+func (m Model) compactCrashes() bool {
+	return m.mode == ViewCrashes && (m.width < 80 || m.height < 24)
+}
+
+func (m Model) compactDetail() bool {
+	return m.mode == ViewDetail && (m.width < 80 || m.height < 24)
+}
+
+func (m Model) compactCrashPages() []string {
+	budget := spaceBudget{Width: max(1, m.width), Rows: max(1, m.height)}
+	if len(m.openCrashes) == 0 {
+		return recordPages([]string{"NTFUZZ · 0 open crashes\nNo open crashes in this data."}, budget.Width, max(1, budget.Rows-1))
+	}
+	m.crashIdx = max(0, min(m.crashIdx, len(m.openCrashes)-1))
+	c := m.openCrashes[m.crashIdx]
+	state := "UNREPORTED"
+	if strings.TrimSpace(c.IssueURL) != "" {
+		state = "REPORTED"
+	}
+	first := fmt.Sprintf("NTFUZZ · %s\nCrash %d/%d · #%d · %s\n%s / %s",
+		openCrashSummary(len(m.openCrashes)), m.crashIdx+1, len(m.openCrashes), c.ID, state, c.ProjectName, c.TargetName)
+	if status := m.compactDataStatus(); status != "" {
+		first += "\n" + status
+	}
+	records := []string{first}
+	if c.BlamedModule != "" {
+		blame := "Blame: " + c.BlamedModule
+		if c.BlamedVersion != "" {
+			blame += "@" + c.BlamedVersion
+		}
+		if c.BlamedFile != "" {
+			blame += " · " + c.BlamedFile
+			if c.BlamedLine > 0 {
+				blame += fmt.Sprintf(":%d", c.BlamedLine)
+			}
+		}
+		records = append(records, blame)
+	}
+	if !c.LastSeen.IsZero() {
+		records = append(records, "Last seen: "+c.LastSeen.UTC().Format("2006-01-02 15:04 UTC"))
+	}
+	records = append(records, fmt.Sprintf("Report: /crashes/%d\nStack: %s", c.ID, crashSummaryLine(c.Stack)))
+	return recordPages(records, budget.Width, max(1, budget.Rows-2))
+}
+
 func (m Model) compactCrashesView() tea.View {
 	width := max(1, m.width)
-	lines := []string{"NTFUZZ · " + openCrashSummary(len(m.openCrashes))}
-	if status := m.compactDataStatus(); status != "" {
-		lines = append(lines, status)
-	}
+	pages := m.compactCrashPages()
+	page := max(0, min(m.crashPage, len(pages)-1))
+	lines := []string{pages[page]}
 	if len(m.openCrashes) == 0 {
-		lines = append(lines, "No open crashes in this data.", "c fleet · g graphs")
+		lines = append(lines, ansi.Truncate("c fleet · g graphs", width, "…"))
 	} else {
-		m.crashIdx = max(0, min(m.crashIdx, len(m.openCrashes)-1))
-		c := m.openCrashes[m.crashIdx]
+		lines = append(lines,
+			ansi.Truncate(fmt.Sprintf("Page %d/%d · [/] pages", page+1, len(pages)), width, "…"),
+			ansi.Truncate("↑↓ crash · enter detail · c fleet", width, "…"),
+		)
+	}
+	v := tea.NewView(strings.Join(lines, "\n"))
+	v.AltScreen = true
+	return v
+}
+
+func (m Model) compactDetailPages() []string {
+	budget := spaceBudget{Width: max(1, m.width), Rows: max(1, m.height)}
+	header := "NTFUZZ · Target detail"
+	if status := m.compactDataStatus(); status != "" {
+		header += "\n" + status
+	}
+
+	selected := -1
+	for i, c := range m.detailCrashes {
+		if m.selectedCrashID != 0 && c.ID == m.selectedCrashID {
+			selected = i
+			break
+		}
+	}
+
+	var primary string
+	if selected >= 0 {
+		c := m.detailCrashes[selected]
 		state := "UNREPORTED"
 		if strings.TrimSpace(c.IssueURL) != "" {
 			state = "REPORTED"
 		}
-		lines = append(lines,
-			fmt.Sprintf("Crash %d/%d · #%d · %s", m.crashIdx+1, len(m.openCrashes), c.ID, state),
-			c.ProjectName+" / "+c.TargetName,
-		)
+		var b strings.Builder
+		fmt.Fprintf(&b, "Crash #%d · %s\n%s / %s\nReport: /crashes/%d\nMarkdown: /api/crashes/%d/report.md", c.ID, state, c.ProjectName, c.TargetName, c.ID, c.ID)
 		if c.BlamedModule != "" {
-			blame := "Blame: " + c.BlamedModule
+			blame := c.BlamedModule
 			if c.BlamedVersion != "" {
 				blame += "@" + c.BlamedVersion
 			}
@@ -269,19 +337,78 @@ func (m Model) compactCrashesView() tea.View {
 					blame += fmt.Sprintf(":%d", c.BlamedLine)
 				}
 			}
-			lines = append(lines, blame)
+			fmt.Fprintf(&b, "\nBlame: %s", blame)
 		}
 		if !c.LastSeen.IsZero() {
-			lines = append(lines, "Last seen: "+c.LastSeen.UTC().Format("2006-01-02 15:04 UTC"))
+			fmt.Fprintf(&b, "\nLast seen: %s", c.LastSeen.UTC().Format("2006-01-02 15:04 UTC"))
 		}
-		lines = append(lines,
-			"Report: "+fmt.Sprintf("/crashes/%d", c.ID),
-			"Stack: "+crashSummaryLine(c.Stack),
-			"Open the report with Crash reports below.",
-			"↑↓ crash · enter target · c fleet",
-		)
+		fmt.Fprintf(&b, "\nInput: %s\nFingerprint: %s\nRevision: %s", nonEmpty(c.InputHash, "n/a"), nonEmpty(c.StackFingerprint, "n/a"), formatRevision(c.GitSHA, c.Dirty))
+		if strings.TrimSpace(c.IssueURL) != "" {
+			fmt.Fprintf(&b, "\nIssue: %s", c.IssueURL)
+		}
+		if stack := strings.TrimSpace(c.Stack); stack != "" {
+			fmt.Fprintf(&b, "\nStack:\n%s", stack)
+		}
+		primary = b.String()
+	} else if m.detailTarget != nil {
+		primary = compactTargetSummary(*m.detailTarget)
+	} else {
+		primary = "No target selected."
 	}
-	v := tea.NewView(ansi.Wrap(strings.Join(lines, "\n"), width, ""))
+	records := []string{header + "\n" + primary}
+
+	if selected >= 0 && m.detailTarget != nil {
+		records = append(records, compactTargetSummary(*m.detailTarget))
+	}
+	if len(m.detailHistory) == 0 {
+		records = append(records, "Coverage history: no runs recorded.")
+	} else {
+		first := m.detailHistory[0]
+		last := m.detailHistory[len(m.detailHistory)-1]
+		records = append(records, fmt.Sprintf("Coverage history · %d runs\nCoverage: %.1f%% → %.1f%%\nCorpus: %d → %d", len(m.detailHistory), first.CoveragePct, last.CoveragePct, first.CorpusCount, last.CorpusCount))
+	}
+
+	records = append(records, fmt.Sprintf("Recent runs (%d)", len(m.detailRuns)))
+	for i, r := range m.detailRuns {
+		if i == 5 {
+			records = append(records, fmt.Sprintf("%d more runs: /api/runs?target=%d", len(m.detailRuns)-i, r.TargetID))
+			break
+		}
+		cursor := "  "
+		if i == m.runsTable.Cursor() {
+			cursor = "› "
+		}
+		run := fmt.Sprintf("%sRun #%d · %s\n%s · %.1fs · %s\n%d execs · %.1f%% cov · corpus %d (+%d)\nRevision: %s · Worker: %s",
+			cursor, r.ID, strings.ToUpper(r.Status), r.Started.UTC().Format("2006-01-02 15:04 UTC"), r.DurationSec, FormatExecRate(r.ExecsPerSec), r.Execs, r.CoveragePct, r.CorpusCount, r.NewInteresting, formatRevision(r.GitSHA, r.Dirty), nonEmpty(r.Worker, "n/a"))
+		if strings.TrimSpace(r.Diagnostic) != "" {
+			run += "\nDiagnostic:\n" + r.Diagnostic
+		}
+		records = append(records, run)
+	}
+	for i, c := range m.detailCrashes {
+		if i == selected {
+			continue
+		}
+		records = append(records, fmt.Sprintf("Crash #%d\nReport: /crashes/%d\nStack: %s", c.ID, c.ID, crashSummaryLine(c.Stack)))
+	}
+	return recordPages(records, budget.Width, max(1, budget.Rows-2))
+}
+
+func compactTargetSummary(t api.Target) string {
+	return fmt.Sprintf("Target: %s\nProject: %s\nPackage: %s\nStatus: %s · %.1f%% coverage\nRate: %s · Corpus: %d · Runs: %d\nRevision: %s · Go: %s",
+		t.Name, t.ProjectName, nonEmpty(t.Package, "n/a"), strings.ToUpper(t.Status), t.CoveragePct, FormatExecRate(t.ExecsPerSec), t.CorpusCount, t.TotalRuns, formatRevision(t.GitSHA, t.Dirty), nonEmpty(t.GoVersion, "n/a"))
+}
+
+func (m Model) compactDetailView() tea.View {
+	width := max(1, m.width)
+	pages := m.compactDetailPages()
+	page := max(0, min(m.detailPage, len(pages)-1))
+	lines := []string{
+		pages[page],
+		ansi.Truncate(fmt.Sprintf("Page %d/%d · [/] pages", page+1, len(pages)), width, "…"),
+		ansi.Truncate("↑↓ run · esc back · c crashes", width, "…"),
+	}
+	v := tea.NewView(strings.Join(lines, "\n"))
 	v.AltScreen = true
 	return v
 }

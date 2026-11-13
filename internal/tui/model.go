@@ -156,6 +156,7 @@ type Model struct {
 	projectIdx  int // 0 = All Projects, 1..N = projects[projectIdx-1]
 	selectedIdx int
 	crashIdx    int
+	crashPage   int
 	sortCol     SortColumn
 	sortDesc    bool
 	lastUpdated time.Time
@@ -165,6 +166,7 @@ type Model struct {
 	// Target Detail state
 	detailTarget    *api.Target
 	selectedCrashID int64
+	detailPage      int
 	detailRuns      []api.Run
 	detailCrashes   []api.Crash
 	detailHistory   []api.CoveragePoint
@@ -530,6 +532,26 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if m.compactCrashes() {
+			switch msg.String() {
+			case "[":
+				m.crashPage = max(0, m.crashPage-1)
+				return m, nil
+			case "]":
+				m.crashPage = min(m.crashPage+1, len(m.compactCrashPages())-1)
+				return m, nil
+			}
+		}
+		if m.compactDetail() {
+			switch msg.String() {
+			case "[":
+				m.detailPage = max(0, m.detailPage-1)
+				return m, nil
+			case "]":
+				m.detailPage = min(m.detailPage+1, len(m.compactDetailPages())-1)
+				return m, nil
+			}
+		}
 		if m.mode == ViewStats && m.currentStatsQuery().ID == api.StatsQueryRevisions {
 			switch msg.String() {
 			case "[":
@@ -661,6 +683,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedCrashID = 0
 				m.prevMode = ViewFleet
 				m.mode = ViewDetail
+				m.detailPage = 0
 				m.detailRuns = nil
 				m.detailCrashes = nil
 				m.detailHistory = nil
@@ -673,6 +696,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedCrashID = crash.ID
 				m.prevMode = ViewCrashes
 				m.mode = ViewDetail
+				m.detailPage = 0
 				m.detailRuns = nil
 				m.detailCrashes = m.crashesForTarget(selected.ID, crash)
 				m.detailHistory = nil
@@ -688,6 +712,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ViewCrashes:
 				if m.crashIdx > 0 {
 					m.crashIdx--
+					m.crashPage = 0
 				}
 			case ViewStats:
 				m.statsQueryIdx = (m.statsQueryIdx - 1 + len(CannedQueries)) % len(CannedQueries)
@@ -708,6 +733,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ViewCrashes:
 				if m.crashIdx < len(m.openCrashes)-1 {
 					m.crashIdx++
+					m.crashPage = 0
 				}
 			case ViewStats:
 				m.statsQueryIdx = (m.statsQueryIdx + 1) % len(CannedQueries)
@@ -886,8 +912,11 @@ func (m Model) View() tea.View {
 	if m.mode == ViewFleet && (m.width < 80 || m.height < 24) {
 		return m.compactFleetView()
 	}
-	if m.mode == ViewCrashes && (m.width < 80 || m.height < 24) {
+	if m.compactCrashes() {
 		return m.compactCrashesView()
+	}
+	if m.compactDetail() {
+		return m.compactDetailView()
 	}
 	if m.compactStats() {
 		return m.compactStatsView()
@@ -1545,9 +1574,9 @@ func crashSummaryLine(stack string) string {
 
 func (m Model) keyMap() KeyMap {
 	km := NewKeyMap(m.mode, m.hideHelp)
-	revisions := m.mode == ViewStats && m.currentStatsQuery().ID == api.StatsQueryRevisions
-	km.PagePrev.SetEnabled(revisions)
-	km.PageNext.SetEnabled(revisions)
+	paging := m.compactCrashes() || m.compactDetail() || m.mode == ViewStats && m.currentStatsQuery().ID == api.StatsQueryRevisions
+	km.PagePrev.SetEnabled(paging)
+	km.PageNext.SetEnabled(paging)
 	if m.readOnly {
 		km.FixCrash.SetEnabled(false)
 	}

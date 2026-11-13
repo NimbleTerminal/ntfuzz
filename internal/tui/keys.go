@@ -70,6 +70,10 @@ func NewKeyMap(mode ViewMode, hideHelp bool) KeyMap {
 		upLabel = "Prev query"
 		downLabel = "Next query"
 	}
+	if mode == ViewDetail {
+		upLabel = "Previous run"
+		downLabel = "Next run"
+	}
 
 	return KeyMap{
 		PagePrev:   key.NewBinding(key.WithKeys("["), key.WithHelp("[", "Prev page")),
@@ -98,9 +102,9 @@ func NewKeyMap(mode ViewMode, hideHelp bool) KeyMap {
 func (k KeyMap) ShortHelp() []key.Binding {
 	switch k.mode {
 	case ViewDetail:
-		return []key.Binding{k.Back, k.Up, k.Down, k.Graphs, k.Refresh, k.Crashes, k.More}
+		return []key.Binding{k.Back, k.PageNext, k.PagePrev, k.Up, k.Down, k.Graphs, k.Refresh, k.Crashes, k.More}
 	case ViewCrashes:
-		return []key.Binding{k.Enter, k.Back, k.Up, k.Down, k.FixCrash, k.Graphs, k.Crashes, k.Refresh}
+		return []key.Binding{k.Enter, k.Back, k.PageNext, k.PagePrev, k.Up, k.Down, k.FixCrash, k.Graphs, k.Crashes, k.Refresh}
 	case ViewStats:
 		return []key.Binding{k.Back, k.Up, k.Down, k.Window, k.Graphics, k.Project, k.PagePrev, k.PageNext, k.Graphs, k.Crashes, k.Refresh}
 	default:
@@ -113,12 +117,12 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	switch k.mode {
 	case ViewDetail:
 		return [][]key.Binding{
-			{k.Back, k.Up, k.Down, k.Graphs},
+			{k.Back, k.Up, k.Down, k.PagePrev, k.PageNext, k.Graphs},
 			{k.Refresh, k.Crashes, k.More, k.Visibility, k.Quit},
 		}
 	case ViewCrashes:
 		return [][]key.Binding{
-			{k.Enter, k.Back, k.Up, k.Down, k.FixCrash},
+			{k.Enter, k.Back, k.Up, k.Down, k.PagePrev, k.PageNext, k.FixCrash},
 			{k.Graphs, k.Crashes, k.Refresh, k.More, k.Visibility, k.Quit},
 		}
 	case ViewStats:

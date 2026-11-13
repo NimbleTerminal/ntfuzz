@@ -42,10 +42,10 @@ physical-device check; Chrome emulation is not a substitute.
 
 ## Application responsibilities
 
-Below 80 columns, or below 24 rows, Fleet, Crashes, and Stats use compact presentations.
-Desktop tables remain unchanged. Width chooses presentation; height budgets the
-content. Font size is not reduced to squeeze in a desktop dashboard. Compact Fleet
-and Stats retain read-only snapshot freshness.
+Below 80 columns, or below 24 rows, Fleet, Target detail, Crashes, and Stats use
+compact presentations. Desktop tables remain unchanged. Width chooses
+presentation; height budgets the content. Font size is not reduced to squeeze in
+a desktop dashboard. Compact Fleet and Stats retain read-only snapshot freshness.
 
 Revisions prioritizes observation/sync time, run outcomes, saved-input replay
 pass/fail/blocked/pending counts, and tested targets. It replaces the chart/table
@@ -62,13 +62,16 @@ suppress the chart before consuming the space needed for the summary. Switching
 to compact revision records releases Kitty graphics resources.
 
 Compact Crashes presents one wrapped record at a time, retaining the report path,
-blamed source, and stack summary. The web shell also links to a server-rendered
+blamed source, and stack summary. Crash drill-down opens a compact Target detail
+view with the selected crash and its full stack first, followed by target,
+coverage, and up to five recent run records with an API link to older runs.
+Both views paginate wrapped content to fit short panes; previous/next page controls
+are available as Terminal Actions. The web shell also links to a server-rendered
 HTML crash index for direct report navigation and screen-reader access.
 
-Remaining application work: target detail still uses the existing layout. Long
-fleet target names are abbreviated in the compact list. A general responsive
-widget package should wait until that screen and another application demonstrate
-which constraints are actually reusable.
+Long fleet target names are abbreviated in the compact list. A general responsive
+widget package should wait until another application demonstrates which
+constraints are actually reusable.
 
 ## Validation
 
