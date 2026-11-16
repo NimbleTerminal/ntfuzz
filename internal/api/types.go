@@ -454,3 +454,15 @@ func StatsResponseFromStore(s store.StatsSeries) StatsResponse {
 
 // Revision describes an observed repository revision and its verification progress.
 type Revision = store.Revision
+
+// CrashRepairOptions configures crash reproducer inspection and repair.
+type CrashRepairOptions = store.CrashRepairOptions
+
+// CrashRepairCandidate describes a candidate reproducer source inspected for a crash record.
+type CrashRepairCandidate = store.CrashRepairCandidate
+
+// CrashRepairAction reports the inspection findings and proposed or applied changes for a single crash record.
+type CrashRepairAction = store.CrashRepairAction
+
+// CrashRepairReport summarizes a dry-run or applied repair pass across selected crashes.
+type CrashRepairReport = store.CrashRepairReport

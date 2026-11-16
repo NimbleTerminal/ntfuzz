@@ -900,6 +900,7 @@ func (s *Store) backfillCrashes(ctx context.Context) error {
 			COALESCE(c.stack, ''),
 			COALESCE(c.stack_fingerprint, ''),
 			COALESCE(c.blamed_module, ''),
+			COALESCE(c.input_hash, ''),
 			COALESCE(c.minimized_input, ''),
 			COALESCE(OCTET_LENGTH(c.input_bytes), 0),
 			COALESCE(p.name, ''),
@@ -917,6 +918,7 @@ func (s *Store) backfillCrashes(ctx context.Context) error {
 		stack          string
 		stackFP        string
 		blamedModule   string
+		inputHash      string
 		minimizedInput string
 		inputLen       int
 		projectName    string
@@ -930,6 +932,7 @@ func (s *Store) backfillCrashes(ctx context.Context) error {
 			&it.stack,
 			&it.stackFP,
 			&it.blamedModule,
+			&it.inputHash,
 			&it.minimizedInput,
 			&it.inputLen,
 			&it.projectName,
@@ -961,11 +964,14 @@ func (s *Store) backfillCrashes(ctx context.Context) error {
 		var backfilledTrunc bool
 		if it.inputLen == 0 && isSafeBackfillInputPath(it.minimizedInput) {
 			if raw, readErr := os.ReadFile(it.minimizedInput); readErr == nil && len(raw) > 0 {
-				if len(raw) > MaxCrashInputBytes {
-					backfilledInput = append([]byte(nil), raw[:MaxCrashInputBytes]...)
-					backfilledTrunc = true
-				} else {
-					backfilledInput = raw
+				contentHash := HashCrashInput(raw)
+				if it.inputHash == "" || it.inputHash == contentHash || filepath.Base(it.minimizedInput) == it.inputHash {
+					if len(raw) > MaxCrashInputBytes {
+						backfilledInput = append([]byte(nil), raw[:MaxCrashInputBytes]...)
+						backfilledTrunc = true
+					} else {
+						backfilledInput = raw
+					}
 				}
 			}
 		}
@@ -1004,22 +1010,40 @@ func (s *Store) backfillCrashes(ctx context.Context) error {
 	return nil
 }
 
-func isSafeBackfillInputPath(p string) bool {
-	p = strings.TrimSpace(p)
-	if p == "" || p == "inline-failure" {
-		return false
-	}
+// HashCrashInput returns the 32-character hex SHA-256[:16] digest used for crash reproducers.
+func HashCrashInput(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:16])
+}
+
+func hasTraversalSegment(p string) bool {
 	for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
 		if seg == ".." {
-			return false
+			return true
 		}
+	}
+	return false
+}
+
+func canReadCrashInputFile(p string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" || p == "inline-failure" || hasTraversalSegment(p) {
+		return false
+	}
+	info, err := os.Lstat(p)
+	return err == nil && info.Mode().IsRegular() && info.Size() > 0
+}
+
+func isSafeBackfillInputPath(p string) bool {
+	p = strings.TrimSpace(p)
+	if !canReadCrashInputFile(p) {
+		return false
 	}
 	slashPath := strings.ReplaceAll(p, "\\", "/")
 	if !strings.Contains(slashPath, "/crashes/") && !strings.HasPrefix(slashPath, "crashes/") && !strings.Contains(slashPath, "/testdata/fuzz/") {
 		return false
 	}
-	info, err := os.Lstat(p)
-	return err == nil && info.Mode().IsRegular()
+	return true
 }
 
 func sanitizeUTF8(s string) string {
@@ -1028,6 +1052,65 @@ func sanitizeUTF8(s string) string {
 		s = strings.ReplaceAll(s, "\x00", "\uFFFD")
 	}
 	return s
+}
+
+func normalizeIncomingCrashReproducer(c *Crash) (inputBytes []byte, inputTruncated bool, fullHash string, diskFallbackOK bool) {
+	inputBytes = c.InputBytes
+	inputTruncated = c.InputTruncated
+
+	var fullDiskBytes []byte
+	if canReadCrashInputFile(c.MinimizedInput) {
+		if raw, err := os.ReadFile(c.MinimizedInput); err == nil && len(raw) > 0 {
+			fullDiskBytes = raw
+			diskFallbackOK = true
+		}
+	}
+
+	// Disk fallback when in-memory InputBytes were omitted by the caller.
+	if len(inputBytes) == 0 && len(fullDiskBytes) > 0 {
+		if len(fullDiskBytes) > MaxCrashInputBytes {
+			inputBytes = append([]byte(nil), fullDiskBytes[:MaxCrashInputBytes]...)
+			inputTruncated = true
+		} else {
+			inputBytes = fullDiskBytes
+			inputTruncated = false
+		}
+		fullHash = HashCrashInput(fullDiskBytes)
+		if c.InputHash == "" {
+			c.InputHash = fullHash
+		}
+		return inputBytes, inputTruncated, fullHash, true
+	}
+
+	if len(inputBytes) > MaxCrashInputBytes {
+		fullHash = HashCrashInput(inputBytes)
+		if c.InputHash == "" {
+			c.InputHash = fullHash
+		}
+		inputBytes = append([]byte(nil), inputBytes[:MaxCrashInputBytes]...)
+		inputTruncated = true
+		return inputBytes, inputTruncated, fullHash, diskFallbackOK
+	}
+
+	if len(inputBytes) > 0 {
+		if inputTruncated {
+			// Caller pre-truncated InputBytes; derive full content hash from the backing disk file if present.
+			if len(fullDiskBytes) > 0 {
+				fullHash = HashCrashInput(fullDiskBytes)
+				if c.InputHash == "" {
+					c.InputHash = fullHash
+				}
+			}
+		} else {
+			fullHash = HashCrashInput(inputBytes)
+			if c.InputHash == "" {
+				c.InputHash = fullHash
+			}
+		}
+		return inputBytes, inputTruncated, fullHash, diskFallbackOK
+	}
+
+	return nil, false, "", false
 }
 
 // RecordCrash inserts a new crash or updates last_seen if the same (target_id, input_hash)
@@ -1064,12 +1147,7 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 		lastSeen = lastSeen.UTC()
 	}
 
-	inputBytes := c.InputBytes
-	inputTruncated := c.InputTruncated
-	if len(inputBytes) > MaxCrashInputBytes {
-		inputBytes = inputBytes[:MaxCrashInputBytes]
-		inputTruncated = true
-	}
+	inputBytes, inputTruncated, fullHash, incomingDiskOK := normalizeIncomingCrashReproducer(&c)
 	inputHex := hex.EncodeToString(inputBytes)
 
 	legacyFP := ""
@@ -1084,8 +1162,12 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 	defer func() { _ = tx.Rollback() }()
 	var existingID int64
 	var fixed sql.NullTime
+	var existingHash, existingMinInput string
+	var existingBytesLen int
+	var existingTruncated bool
 	err = tx.QueryRowContext(ctx,
-		`SELECT id,fixed_at FROM crashes
+		`SELECT id, fixed_at, COALESCE(input_hash, ''), COALESCE(minimized_input, ''), COALESCE(OCTET_LENGTH(input_bytes), 0), COALESCE(input_truncated, FALSE)
+		 FROM crashes
 		 WHERE target_id = ? AND (
 		     input_hash = ?
 		     OR (? != '' AND stack_fingerprint = ?)
@@ -1095,7 +1177,7 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 		c.TargetID, c.InputHash,
 		c.StackFingerprint, c.StackFingerprint,
 		legacyFP, legacyFP,
-	).Scan(&existingID, &fixed)
+	).Scan(&existingID, &fixed, &existingHash, &existingMinInput, &existingBytesLen, &existingTruncated)
 	if errors.Is(err, sql.ErrNoRows) {
 		var id int64
 		err = tx.QueryRowContext(ctx,
@@ -1128,38 +1210,98 @@ func (s *Store) RecordCrash(ctx context.Context, c Crash) (int64, error) {
 		return 0, fmt.Errorf("query existing crash: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx,
-		`UPDATE crashes
-		 SET last_seen = ?,
-		     fixed_at = NULL,
-		     stack = CASE WHEN ? != '' THEN ? ELSE stack END,
-		     stack_fingerprint = CASE WHEN ? != '' THEN ? ELSE stack_fingerprint END,
-		     minimized_input = CASE WHEN ? != '' THEN ? ELSE minimized_input END,
-		     input_bytes = CASE WHEN ? != '' THEN unhex(?) ELSE input_bytes END,
-		     input_truncated = CASE WHEN ? != '' OR ? THEN ? ELSE COALESCE(input_truncated, FALSE) END,
-		     git_sha = CASE WHEN ? != '' THEN ? ELSE git_sha END,
-		     dirty = ?,
-		     go_version = CASE WHEN ? != '' THEN ? ELSE go_version END,
-		     blamed_module = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_module, '') END,
-		     blamed_version = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_version, '') END,
-		     blamed_file = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_file, '') END,
-		     blamed_line = CASE WHEN ? > 0 THEN ? ELSE COALESCE(blamed_line, 0) END
-		 WHERE id = ?`,
-		lastSeen,
-		c.Stack, c.Stack,
-		c.StackFingerprint, c.StackFingerprint,
-		c.MinimizedInput, c.MinimizedInput,
-		inputHex, inputHex,
-		inputHex, inputTruncated, inputTruncated,
-		c.GitSHA, c.GitSHA,
-		c.Dirty,
-		c.GoVersion, c.GoVersion,
-		c.BlamedModule, c.BlamedModule,
-		c.BlamedVersion, c.BlamedVersion,
-		c.BlamedFile, c.BlamedFile,
-		c.BlamedLine, c.BlamedLine,
-		existingID,
-	)
+	existingDiskOK := canReadCrashInputFile(existingMinInput)
+	existingHasUsableRepro := (existingBytesLen > 0 && !existingTruncated) || existingDiskOK
+
+	var replaceReproducer bool
+	switch {
+	case c.InputHash == "":
+		replaceReproducer = false
+	case len(inputBytes) > 0 && !inputTruncated:
+		replaceReproducer = true
+	case len(inputBytes) > 0 && inputTruncated:
+		// A truncated in-DB preview requires a backing file on disk to be replayable,
+		// so only replace an existing usable reproducer when the full file is present.
+		replaceReproducer = incomingDiskOK || !existingHasUsableRepro
+	default:
+		// Incoming crash has no input bytes (and no readable disk fallback).
+		// Preserve any existing usable reproducer atomically.
+		if existingBytesLen == 0 && !existingDiskOK && c.MinimizedInput != "inline-failure" {
+			replaceReproducer = true
+		}
+	}
+
+	if replaceReproducer && fullHash != "" && filepath.Base(c.MinimizedInput) == fullHash {
+		c.InputHash = fullHash
+	}
+	newMinInput := c.MinimizedInput
+	if c.InputHash == existingHash && newMinInput == "" {
+		newMinInput = existingMinInput
+	}
+
+	if replaceReproducer {
+		_, err = tx.ExecContext(ctx,
+			`UPDATE crashes
+			 SET last_seen = ?,
+			     fixed_at = NULL,
+			     stack = CASE WHEN ? != '' THEN ? ELSE stack END,
+			     stack_fingerprint = CASE WHEN ? != '' THEN ? ELSE stack_fingerprint END,
+			     input_hash = ?,
+			     minimized_input = ?,
+			     input_bytes = CASE WHEN ? != '' THEN unhex(?) ELSE NULL END,
+			     input_truncated = ?,
+			     git_sha = CASE WHEN ? != '' THEN ? ELSE git_sha END,
+			     dirty = ?,
+			     go_version = CASE WHEN ? != '' THEN ? ELSE go_version END,
+			     blamed_module = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_module, '') END,
+			     blamed_version = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_version, '') END,
+			     blamed_file = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_file, '') END,
+			     blamed_line = CASE WHEN ? > 0 THEN ? ELSE COALESCE(blamed_line, 0) END
+			 WHERE id = ?`,
+			lastSeen,
+			c.Stack, c.Stack,
+			c.StackFingerprint, c.StackFingerprint,
+			c.InputHash,
+			newMinInput,
+			inputHex, inputHex,
+			inputTruncated,
+			c.GitSHA, c.GitSHA,
+			c.Dirty,
+			c.GoVersion, c.GoVersion,
+			c.BlamedModule, c.BlamedModule,
+			c.BlamedVersion, c.BlamedVersion,
+			c.BlamedFile, c.BlamedFile,
+			c.BlamedLine, c.BlamedLine,
+			existingID,
+		)
+	} else {
+		_, err = tx.ExecContext(ctx,
+			`UPDATE crashes
+			 SET last_seen = ?,
+			     fixed_at = NULL,
+			     stack = CASE WHEN ? != '' THEN ? ELSE stack END,
+			     stack_fingerprint = CASE WHEN ? != '' THEN ? ELSE stack_fingerprint END,
+			     git_sha = CASE WHEN ? != '' THEN ? ELSE git_sha END,
+			     dirty = ?,
+			     go_version = CASE WHEN ? != '' THEN ? ELSE go_version END,
+			     blamed_module = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_module, '') END,
+			     blamed_version = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_version, '') END,
+			     blamed_file = CASE WHEN ? != '' THEN ? ELSE COALESCE(blamed_file, '') END,
+			     blamed_line = CASE WHEN ? > 0 THEN ? ELSE COALESCE(blamed_line, 0) END
+			 WHERE id = ?`,
+			lastSeen,
+			c.Stack, c.Stack,
+			c.StackFingerprint, c.StackFingerprint,
+			c.GitSHA, c.GitSHA,
+			c.Dirty,
+			c.GoVersion, c.GoVersion,
+			c.BlamedModule, c.BlamedModule,
+			c.BlamedVersion, c.BlamedVersion,
+			c.BlamedFile, c.BlamedFile,
+			c.BlamedLine, c.BlamedLine,
+			existingID,
+		)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("update crash %d: %w", existingID, err)
 	}
@@ -1487,10 +1629,10 @@ func (s *Store) crashSelectSQL(ctx context.Context) string {
 				COALESCE(c.issue_url, ''),
 				COALESCE(c.git_sha, ''), COALESCE(c.dirty, FALSE), COALESCE(c.go_version, ''),
 				'' AS blamed_module, '' AS blamed_version, '' AS blamed_file, 0 AS blamed_line,
-				COALESCE((SELECT r.outcome FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), ''),
-				COALESCE((SELECT r.git_sha FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), ''),
-				(SELECT r.checked_at FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1),
-				COALESCE((SELECT r.diagnostic FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), '')
+				COALESCE((SELECT r.outcome FROM crash_replays r WHERE r.crash_id = c.id AND r.input_hash = c.input_hash ORDER BY r.checked_at DESC LIMIT 1), ''),
+				COALESCE((SELECT r.git_sha FROM crash_replays r WHERE r.crash_id = c.id AND r.input_hash = c.input_hash ORDER BY r.checked_at DESC LIMIT 1), ''),
+				(SELECT r.checked_at FROM crash_replays r WHERE r.crash_id = c.id AND r.input_hash = c.input_hash ORDER BY r.checked_at DESC LIMIT 1),
+				COALESCE((SELECT r.diagnostic FROM crash_replays r WHERE r.crash_id = c.id AND r.input_hash = c.input_hash ORDER BY r.checked_at DESC LIMIT 1), '')
 			FROM crashes c
 			JOIN targets t ON t.id = c.target_id
 			JOIN projects p ON p.id = t.project_id
@@ -1506,10 +1648,10 @@ func (s *Store) crashSelectSQL(ctx context.Context) string {
 			COALESCE(c.issue_url, ''),
 			COALESCE(c.git_sha, ''), COALESCE(c.dirty, FALSE), COALESCE(c.go_version, ''),
 			COALESCE(c.blamed_module, ''), COALESCE(c.blamed_version, ''), COALESCE(c.blamed_file, ''), COALESCE(c.blamed_line, 0),
-			COALESCE((SELECT r.outcome FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), ''),
-			COALESCE((SELECT r.git_sha FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), ''),
-			(SELECT r.checked_at FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1),
-			COALESCE((SELECT r.diagnostic FROM crash_replays r WHERE r.crash_id = c.id ORDER BY r.checked_at DESC LIMIT 1), '')
+			COALESCE((SELECT r.outcome FROM crash_replays r WHERE r.crash_id = c.id AND r.input_hash = c.input_hash ORDER BY r.checked_at DESC LIMIT 1), ''),
+			COALESCE((SELECT r.git_sha FROM crash_replays r WHERE r.crash_id = c.id AND r.input_hash = c.input_hash ORDER BY r.checked_at DESC LIMIT 1), ''),
+			(SELECT r.checked_at FROM crash_replays r WHERE r.crash_id = c.id AND r.input_hash = c.input_hash ORDER BY r.checked_at DESC LIMIT 1),
+			COALESCE((SELECT r.diagnostic FROM crash_replays r WHERE r.crash_id = c.id AND r.input_hash = c.input_hash ORDER BY r.checked_at DESC LIMIT 1), '')
 		FROM crashes c
 		JOIN targets t ON t.id = c.target_id
 		JOIN projects p ON p.id = t.project_id

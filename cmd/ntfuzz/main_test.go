@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -182,5 +183,59 @@ func TestCrashLinkListAndReportCommands(t *testing.T) {
 		if !strings.Contains(reportOut.String(), want) {
 			t.Errorf("crash report missing %q:\n%s", want, reportOut.String())
 		}
+	}
+
+	// 4. ntfuzz crash repair --dry-run and apply
+	corpusDir := filepath.Join(t.TempDir(), "crashes", "nimbleterminal.dev_nt3d_mesh_gltf", "FuzzDecode")
+	if err := os.MkdirAll(corpusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reproBytes := []byte("go test fuzz v1\n[]byte(\"repaired-gltf\")\n")
+	reproHash := store.HashCrashInput(reproBytes)
+	reproPath := filepath.Join(corpusDir, reproHash)
+	if err := os.WriteFile(reproPath, reproBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cID2, err := st.RecordCrash(ctx, store.Crash{
+		TargetID:         tID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            "panic: another crash",
+		StackFingerprint: "fp999",
+		InputHash:        "00000000000000000000000000000000",
+		MinimizedInput:   reproPath,
+		InputBytes:       reproBytes,
+		GitSHA:           "abc123def456",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var dryOut bytes.Buffer
+	repairDryCmd := newCrashCmd()
+	repairDryCmd.SetOut(&dryOut)
+	repairDryCmd.SetArgs([]string{"repair", fmt.Sprint(cID2), "--dry-run", "--api", ts.URL})
+	if err := repairDryCmd.Execute(); err != nil {
+		t.Fatalf("crash repair --dry-run failed: %v", err)
+	}
+	for _, want := range []string{"DRY-RUN", "status=REPAIRABLE", "00000000000000000000000000000000 -> " + reproHash} {
+		if !strings.Contains(dryOut.String(), want) {
+			t.Fatalf("crash repair --dry-run missing %q:\n%s", want, dryOut.String())
+		}
+	}
+
+	var applyOut bytes.Buffer
+	repairApplyCmd := newCrashCmd()
+	repairApplyCmd.SetOut(&applyOut)
+	repairApplyCmd.SetArgs([]string{"repair", fmt.Sprint(cID2), "--api", ts.URL})
+	if err := repairApplyCmd.Execute(); err != nil {
+		t.Fatalf("crash repair apply failed: %v", err)
+	}
+	if !strings.Contains(applyOut.String(), "status=REPAIRED") {
+		t.Fatalf("expected status=REPAIRED, got:\n%s", applyOut.String())
+	}
+	fixedC2, err := st.GetCrash(ctx, cID2)
+	if err != nil || fixedC2.InputHash != reproHash || fixedC2.FixedAt != nil {
+		t.Fatalf("unexpected repaired crash state: %+v (err=%v)", fixedC2, err)
 	}
 }

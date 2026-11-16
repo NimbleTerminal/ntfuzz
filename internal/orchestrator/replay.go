@@ -121,6 +121,61 @@ func replayCrash(ctx context.Context, job JobSpec, c store.Crash) (outcome, diag
 	return "blocked", "Reproducer did not complete (build error, missing target, or invalid input): " + diagnostic
 }
 
+// VerifyCrashInputAtRevision extracts gitSHA from repoDir into a disposable temporary directory
+// (without modifying repoDir or acquiring git worktree locks) and executes replayCrash on inputBytes.
+func VerifyCrashInputAtRevision(ctx context.Context, repoDir, gitSHA, pkgRelDir, targetName string, crashID int64, inputBytes []byte) (outcome, diagnostic string) {
+	if len(inputBytes) == 0 {
+		return "blocked", "empty candidate input bytes"
+	}
+	absRepo, err := filepath.Abs(repoDir)
+	if err != nil {
+		return "blocked", err.Error()
+	}
+	tmpRoot, err := os.MkdirTemp("", "ntfuzz-verify-rev-*")
+	if err != nil {
+		return "blocked", err.Error()
+	}
+	defer func() { _ = os.RemoveAll(tmpRoot) }()
+
+	modDir := filepath.Join(tmpRoot, filepath.Base(absRepo))
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		return "blocked", err.Error()
+	}
+
+	ref := strings.TrimSpace(gitSHA)
+	if ref == "" {
+		ref = "HEAD"
+	}
+	archiveFile := filepath.Join(tmpRoot, "revision.tar")
+	if err := runGit(ctx, absRepo, "archive", "--format=tar", "-o", archiveFile, ref); err != nil {
+		return "blocked", sanitizeDiagnostic(err.Error(), absRepo)
+	}
+	tarCmd := exec.CommandContext(ctx, "tar", "-xf", archiveFile, "-C", modDir)
+	if out, err := tarCmd.CombinedOutput(); err != nil {
+		return "blocked", sanitizeDiagnostic(fmt.Sprintf("tar extract %s: %v (%s)", ref, err, strings.TrimSpace(string(out))), absRepo)
+	}
+	_ = os.Remove(archiveFile)
+
+	inputFile := filepath.Join(tmpRoot, store.HashCrashInput(inputBytes))
+	if err := os.WriteFile(inputFile, inputBytes, 0o600); err != nil {
+		return "blocked", err.Error()
+	}
+	capped, trunc := CapCrashInput(inputBytes)
+	c := store.Crash{
+		ID:             crashID,
+		InputHash:      store.HashCrashInput(inputBytes),
+		MinimizedInput: inputFile,
+		InputBytes:     capped,
+		InputTruncated: trunc,
+	}
+	job := JobSpec{
+		RepoDir:    modDir,
+		PkgRelDir:  pkgRelDir,
+		TargetName: targetName,
+	}
+	return replayCrash(ctx, job, c)
+}
+
 func (o *Orchestrator) replayCrashes(ctx context.Context, item scheduledTarget, job JobSpec) {
 	if item.checkout.GitSHA == "" {
 		return

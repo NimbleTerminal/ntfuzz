@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -620,5 +622,485 @@ func TestCrashSharePersistenceTruncationAndV5Compatibility(t *testing.T) {
 	}
 	if len(privSnapCrash.InputBytes) != 0 {
 		t.Fatalf("expected public_inputs=false crash to have InputBytes stripped in snapshot, got %q", privSnapCrash.InputBytes)
+	}
+}
+
+func TestRecordCrashSameFingerprintUpdatesReproducerAtomically(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "dedup.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Date(2026, 11, 14, 3, 46, 0, 0, time.UTC)
+	pID, err := st.SyncProject(ctx, ProjectSyncInput{
+		Name:         "nthtml",
+		Repo:         "https://github.com/NimbleTerminal/nthtml.git",
+		GitSHA:       "c024ebde43e6",
+		PublicInputs: true,
+		SyncedAt:     &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tID, err := st.UpsertTarget(ctx, pID, "nimbleterminal.dev/nthtml/document", "FuzzSupports")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	corpusDir := filepath.Join(t.TempDir(), "corpus", "nthtml", "crashes", "nimbleterminal.dev_nthtml_document", "FuzzSupports")
+	if err := os.MkdirAll(corpusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	input1 := []byte("go test fuzz v1\nstring(\"(:\\xf7\\xf7vAr())\")\n")
+	hash1 := HashCrashInput(input1)
+	path1 := filepath.Join(corpusDir, hash1)
+	if err := os.WriteFile(path1, input1, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	input2 := []byte("go test fuzz v1\nstring(\"(:\\xbc\\xbcvAr())\")\n")
+	hash2 := HashCrashInput(input2)
+	path2 := filepath.Join(corpusDir, hash2)
+	if err := os.WriteFile(path2, input2, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	input3 := []byte("go test fuzz v1\nstring(\"(:0\\x8a\\x8avAr())\")\n")
+	hash3 := HashCrashInput(input3)
+	path3 := filepath.Join(corpusDir, hash3)
+	if err := os.WriteFile(path3, input3, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fp := "c6dc7ec1d16d48aaad5fbcb9"
+
+	// 1. Initial crash record.
+	cID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            "panic: slice bounds out of range [9:7]\nsupports.go:178",
+		StackFingerprint: fp,
+		InputHash:        hash1,
+		MinimizedInput:   path1,
+		InputBytes:       input1,
+		GitSHA:           "c024ebde43e6",
+	})
+	if err != nil {
+		t.Fatalf("RecordCrash 1: %v", err)
+	}
+
+	// 2. Different input with the same stack_fingerprint while open updates hash, path, bytes, and truncation atomically.
+	later := now.Add(time.Hour)
+	cID2, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        later,
+		LastSeen:         later,
+		Stack:            "panic: slice bounds out of range [9:7]\nsupports.go:178",
+		StackFingerprint: fp,
+		InputHash:        hash2,
+		MinimizedInput:   path2,
+		InputBytes:       input2,
+		GitSHA:           "c024ebde43e6",
+	})
+	if err != nil || cID2 != cID {
+		t.Fatalf("RecordCrash 2: id=%d (want %d) err=%v", cID2, cID, err)
+	}
+	got, err := st.GetCrash(ctx, cID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InputHash != hash2 || got.MinimizedInput != path2 || !bytes.Equal(got.InputBytes, input2) || got.InputTruncated {
+		t.Fatalf("after open dedup: got hash=%s path=%s bytes=%q trunc=%t, want hash=%s path=%s",
+			got.InputHash, got.MinimizedInput, got.InputBytes, got.InputTruncated, hash2, path2)
+	}
+
+	// 3. Missing bytes / inline-failure on same stack_fingerprint must NOT clobber the valid saved reproducer.
+	inlineTime := later.Add(10 * time.Minute)
+	cIDInline, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        inlineTime,
+		LastSeen:         inlineTime,
+		Stack:            "panic: slice bounds out of range [9:7]\nsupports.go:178",
+		StackFingerprint: fp,
+		InputHash:        "inline-synthetic-hash",
+		MinimizedInput:   "inline-failure",
+		InputBytes:       nil,
+		GitSHA:           "c024ebde43e6",
+	})
+	if err != nil || cIDInline != cID {
+		t.Fatalf("RecordCrash inline: id=%d err=%v", cIDInline, err)
+	}
+	gotAfterInline, err := st.GetCrash(ctx, cID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAfterInline.InputHash != hash2 || gotAfterInline.MinimizedInput != path2 || !bytes.Equal(gotAfterInline.InputBytes, input2) {
+		t.Fatalf("inline failure clobbered saved reproducer: %+v", gotAfterInline)
+	}
+
+	// 4. Mark crash fixed via replay pass, then reopen with a third distinct input via disk fallback (InputBytes omitted).
+	fixTime := inlineTime.Add(10 * time.Minute)
+	if err := st.RecordReplay(ctx, gotAfterInline, CrashReplay{
+		GitSHA:     "141de7abe3fc",
+		CheckedAt:  fixTime,
+		Outcome:    "passed",
+		Diagnostic: "Saved input executed successfully on this revision",
+	}); err != nil {
+		t.Fatalf("RecordReplay pass: %v", err)
+	}
+	fixedCrash, err := st.GetCrash(ctx, cID)
+	if err != nil || fixedCrash.FixedAt == nil {
+		t.Fatalf("expected crash to be marked fixed, got %+v (err=%v)", fixedCrash, err)
+	}
+
+	reopenTime := fixTime.Add(10 * time.Minute)
+	cIDReopen, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        reopenTime,
+		LastSeen:         reopenTime,
+		Stack:            "panic: slice bounds out of range [9:7]\nsupports.go:178",
+		StackFingerprint: fp,
+		InputHash:        "", // exercises disk fallback hash + bytes resolution
+		MinimizedInput:   path3,
+		InputBytes:       nil,
+		GitSHA:           "141de7abe3fc",
+	})
+	if err != nil || cIDReopen != cID {
+		t.Fatalf("RecordCrash reopen: id=%d err=%v", cIDReopen, err)
+	}
+	reopened, err := st.GetCrash(ctx, cID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.FixedAt != nil {
+		t.Fatalf("expected reopened crash FixedAt == nil, got %v", reopened.FixedAt)
+	}
+	if reopened.InputHash != hash3 || reopened.MinimizedInput != path3 || !bytes.Equal(reopened.InputBytes, input3) || reopened.InputTruncated {
+		t.Fatalf("reopened crash reproducer mismatch: hash=%s (want %s) path=%s bytes=%q",
+			reopened.InputHash, hash3, reopened.MinimizedInput, reopened.InputBytes)
+	}
+	// Stale replay status from hash2 must not be reported as the replay status for hash3.
+	if reopened.ReplayStatus != "" {
+		t.Fatalf("expected empty ReplayStatus for newly recorded input %s, got %q", hash3, reopened.ReplayStatus)
+	}
+	// Historical replay record for hash2 is still preserved in crash_replays.
+	replays, err := st.ListCrashReplays(ctx)
+	if err != nil || len(replays) != 1 || replays[0].InputHash != hash2 {
+		t.Fatalf("expected historical replay for %s preserved, got %+v (err=%v)", hash2, replays, err)
+	}
+
+	// 5. Truncated input (> 64 KiB) backed by a disk file updates hash (full file digest), path, 64 KiB prefix, and truncated=true atomically;
+	// and a subsequent non-truncated input resets truncated=false.
+	bigPayload := append([]byte("go test fuzz v1\n[]byte(\""), bytes.Repeat([]byte("A"), MaxCrashInputBytes+512)...)
+	bigPayload = append(bigPayload, []byte("\")\n")...)
+	bigHash := HashCrashInput(bigPayload)
+	bigPath := filepath.Join(corpusDir, bigHash)
+	if err := os.WriteFile(bigPath, bigPayload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        reopenTime.Add(time.Minute),
+		LastSeen:         reopenTime.Add(time.Minute),
+		Stack:            "panic: slice bounds out of range [9:7]\nsupports.go:178",
+		StackFingerprint: fp,
+		MinimizedInput:   bigPath,
+		InputBytes:       bigPayload[:MaxCrashInputBytes],
+		InputTruncated:   true,
+	}); err != nil {
+		t.Fatalf("RecordCrash big truncated: %v", err)
+	}
+	gotBig, err := st.GetCrash(ctx, cID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBig.InputHash != bigHash || gotBig.MinimizedInput != bigPath || !gotBig.InputTruncated || len(gotBig.InputBytes) != MaxCrashInputBytes {
+		t.Fatalf("unexpected truncated dedup state: hash=%s (want %s) trunc=%t len=%d",
+			gotBig.InputHash, bigHash, gotBig.InputTruncated, len(gotBig.InputBytes))
+	}
+
+	// Unbacked truncated input (no disk file) must NOT overwrite an existing valid reproducer.
+	if _, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        reopenTime.Add(2 * time.Minute),
+		LastSeen:         reopenTime.Add(2 * time.Minute),
+		Stack:            "panic: slice bounds out of range [9:7]\nsupports.go:178",
+		StackFingerprint: fp,
+		InputHash:        "00000000000000000000000000000000",
+		MinimizedInput:   filepath.Join(corpusDir, "nonexistent-big-file"),
+		InputBytes:       bigPayload[:MaxCrashInputBytes],
+		InputTruncated:   true,
+	}); err != nil {
+		t.Fatalf("RecordCrash unbacked truncated: %v", err)
+	}
+	gotStillBig, err := st.GetCrash(ctx, cID)
+	if err != nil || gotStillBig.InputHash != bigHash || gotStillBig.MinimizedInput != bigPath {
+		t.Fatalf("unbacked truncated input overwrote valid reproducer: %+v", gotStillBig)
+	}
+
+	// Subsequent small input resets InputTruncated back to false.
+	if _, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        reopenTime.Add(3 * time.Minute),
+		LastSeen:         reopenTime.Add(3 * time.Minute),
+		Stack:            "panic: slice bounds out of range [9:7]\nsupports.go:178",
+		StackFingerprint: fp,
+		InputHash:        hash1,
+		MinimizedInput:   path1,
+		InputBytes:       input1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gotSmallAgain, err := st.GetCrash(ctx, cID)
+	if err != nil || gotSmallAgain.InputTruncated || gotSmallAgain.InputHash != hash1 || !bytes.Equal(gotSmallAgain.InputBytes, input1) {
+		t.Fatalf("expected InputTruncated reset to false with hash1, got %+v", gotSmallAgain)
+	}
+}
+
+func TestRepairCrashesProvenanceAndSafety(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "repair.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	firstSeen := time.Date(2026, 11, 14, 3, 46, 0, 0, time.UTC)
+	lastSeen := time.Date(2026, 11, 15, 1, 12, 52, 0, time.UTC)
+	syncTime := time.Now().UTC()
+
+	pID, err := st.SyncProject(ctx, ProjectSyncInput{
+		Name:     "nthtml",
+		Repo:     "https://github.com/NimbleTerminal/nthtml.git",
+		GitSHA:   "141de7abe3fc",
+		SyncedAt: &syncTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tID, err := st.UpsertTarget(ctx, pID, "nimbleterminal.dev/nthtml/document", "FuzzSupports")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	corpusDir := filepath.Join(t.TempDir(), "corpus", "nthtml", "crashes", "nimbleterminal.dev_nthtml_document", "FuzzSupports")
+	if err := os.MkdirAll(corpusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeCorpusFile := func(dir, name string, data []byte, mtime time.Time) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !mtime.IsZero() {
+			if err := os.Chtimes(p, mtime, mtime); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return p
+	}
+
+	// Crash 1 (repairable): simulates historical deduplication bug (input_hash=origHash, minimized_input & input_bytes=latestHash).
+	origBytes := []byte("go test fuzz v1\nstring(\"(:\\xf7\\xf7vAr())\")\n")
+	origHash := HashCrashInput(origBytes)
+	_ = writeCorpusFile(corpusDir, origHash, origBytes, firstSeen)
+
+	latestBytes := []byte("go test fuzz v1\nstring(\"(:\\xbc\\xbcvAr())\")\n")
+	latestHash := HashCrashInput(latestBytes)
+	latestPath := writeCorpusFile(corpusDir, latestHash, latestBytes, lastSeen)
+
+	repairableID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        firstSeen,
+		LastSeen:         lastSeen,
+		Stack:            "panic: slice bounds out of range [9:7]",
+		StackFingerprint: "fp-repairable",
+		InputHash:        latestHash,
+		MinimizedInput:   latestPath,
+		InputBytes:       latestBytes,
+		IssueURL:         "https://github.com/NimbleTerminal/nthtml/issues/1",
+		GitSHA:           "c024ebde43e6",
+		GoVersion:        "go1.27.3",
+		BlamedModule:     "example.com/dep",
+		BlamedVersion:    "v1.0.0",
+		BlamedFile:       "dep.go",
+		BlamedLine:       42,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Inject the pre-fix inconsistent state directly into crashes and record a blocked replay.
+	if _, err := st.db.ExecContext(ctx, `UPDATE crashes SET input_hash = ? WHERE id = ?`, origHash, repairableID); err != nil {
+		t.Fatal(err)
+	}
+	mismatchedCrash, err := st.GetCrash(ctx, repairableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordReplay(ctx, mismatchedCrash, CrashReplay{
+		GitSHA:     "141de7abe3fc",
+		CheckedAt:  time.Now().UTC(),
+		Outcome:    "blocked",
+		Diagnostic: "saved input hash mismatch",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Crash 2 (missing file on disk, even though DB has input_bytes): must NOT blindly overwrite input_hash.
+	missingBytes := []byte("go test fuzz v1\nstring(\"missing-on-disk\")\n")
+	missingHash := HashCrashInput(missingBytes)
+	missingID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        firstSeen,
+		LastSeen:         lastSeen,
+		Stack:            "panic: missing file",
+		StackFingerprint: "fp-missing",
+		InputHash:        "11111111111111111111111111111111",
+		MinimizedInput:   filepath.Join(corpusDir, missingHash),
+		InputBytes:       missingBytes,
+		GitSHA:           "c024ebde43e6",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Crash 3 (corrupt corpus file on disk: invalid header).
+	corruptBytes := []byte("not a valid go fuzz corpus file\n")
+	corruptHash := HashCrashInput(corruptBytes)
+	corruptPath := writeCorpusFile(corpusDir, corruptHash, corruptBytes, lastSeen)
+	corruptID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        firstSeen,
+		LastSeen:         lastSeen,
+		Stack:            "panic: corrupt file",
+		StackFingerprint: "fp-corrupt",
+		InputHash:        "22222222222222222222222222222222",
+		MinimizedInput:   corruptPath,
+		InputBytes:       corruptBytes,
+		GitSHA:           "c024ebde43e6",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Crash 4 (ambiguous: DB input_bytes and disk minimized_input file disagree).
+	ambigDiskBytes := []byte("go test fuzz v1\nstring(\"disk-variant\")\n")
+	ambigDiskHash := HashCrashInput(ambigDiskBytes)
+	ambigDiskPath := writeCorpusFile(corpusDir, ambigDiskHash, ambigDiskBytes, lastSeen)
+	ambigDBBytes := []byte("go test fuzz v1\nstring(\"db-variant\")\n")
+	ambigID, err := st.RecordCrash(ctx, Crash{
+		TargetID:         tID,
+		FirstSeen:        firstSeen,
+		LastSeen:         lastSeen,
+		Stack:            "panic: ambiguous",
+		StackFingerprint: "fp-ambiguous",
+		InputHash:        "33333333333333333333333333333333",
+		MinimizedInput:   ambigDiskPath,
+		InputBytes:       ambigDBBytes,
+		GitSHA:           "c024ebde43e6",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-dry-run without crash IDs or All=true must be rejected.
+	if _, err := st.RepairCrashes(ctx, CrashRepairOptions{DryRun: false}); !errors.Is(err, ErrRepairSelectionRequired) {
+		t.Fatalf("expected ErrRepairSelectionRequired, got %v", err)
+	}
+
+	// Dry-run across all crashes inspects everything without mutating the database.
+	dryReport, err := st.RepairCrashes(ctx, CrashRepairOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("RepairCrashes dry-run: %v", err)
+	}
+	if len(dryReport.Actions) != 4 {
+		t.Fatalf("expected 4 actions in dry-run report, got %d", len(dryReport.Actions))
+	}
+	statusByID := map[int64]CrashRepairAction{}
+	for _, a := range dryReport.Actions {
+		statusByID[a.CrashID] = a
+	}
+	if statusByID[repairableID].Status != RepairStatusRepairable || statusByID[repairableID].NewInputHash != latestHash || !statusByID[repairableID].ReplayEligible {
+		t.Fatalf("unexpected repairable dry-run action: %+v", statusByID[repairableID])
+	}
+	if statusByID[missingID].Status != RepairStatusMissing {
+		t.Fatalf("expected missing status for crash %d, got %+v", missingID, statusByID[missingID])
+	}
+	if statusByID[corruptID].Status != RepairStatusCorrupt {
+		t.Fatalf("expected corrupt status for crash %d, got %+v", corruptID, statusByID[corruptID])
+	}
+	if statusByID[ambigID].Status != RepairStatusAmbiguous {
+		t.Fatalf("expected ambiguous status for crash %d, got %+v", ambigID, statusByID[ambigID])
+	}
+
+	// Verify dry-run did not modify crash 1 in the database.
+	afterDry, err := st.GetCrash(ctx, repairableID)
+	if err != nil || afterDry.InputHash != origHash {
+		t.Fatalf("dry-run modified crash 1: %+v (err=%v)", afterDry, err)
+	}
+
+	// Apply repair with explicit crash ID selection.
+	applyReport, err := st.RepairCrashes(ctx, CrashRepairOptions{
+		CrashIDs: []int64{repairableID, missingID, corruptID, ambigID},
+		DryRun:   false,
+	})
+	if err != nil {
+		t.Fatalf("RepairCrashes apply: %v", err)
+	}
+	appliedByID := map[int64]CrashRepairAction{}
+	for _, a := range applyReport.Actions {
+		appliedByID[a.CrashID] = a
+	}
+	if appliedByID[repairableID].Status != RepairStatusRepaired {
+		t.Fatalf("expected repaired status for crash %d, got %+v", repairableID, appliedByID[repairableID])
+	}
+	if appliedByID[missingID].Status != RepairStatusMissing || appliedByID[corruptID].Status != RepairStatusCorrupt || appliedByID[ambigID].Status != RepairStatusAmbiguous {
+		t.Fatalf("unexpected non-repairable statuses on apply: %+v", applyReport.Actions)
+	}
+
+	// Verify crash 1 was updated atomically while preserving ID, timestamps, issue_url, blame, fixed_at=nil, and historical replays.
+	repaired, err := st.GetCrash(ctx, repairableID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.ID != repairableID ||
+		repaired.InputHash != latestHash ||
+		repaired.MinimizedInput != latestPath ||
+		!bytes.Equal(repaired.InputBytes, latestBytes) ||
+		repaired.FixedAt != nil ||
+		repaired.IssueURL != "https://github.com/NimbleTerminal/nthtml/issues/1" ||
+		repaired.GitSHA != "c024ebde43e6" ||
+		repaired.BlamedModule != "example.com/dep" ||
+		!repaired.FirstSeen.Equal(firstSeen) ||
+		!repaired.LastSeen.Equal(lastSeen) {
+		t.Fatalf("repaired crash metadata mismatch: %+v", repaired)
+	}
+
+	// Verify missing, corrupt, and ambiguous records were NOT modified.
+	for id, wantHash := range map[int64]string{
+		missingID: "11111111111111111111111111111111",
+		corruptID: "22222222222222222222222222222222",
+		ambigID:   "33333333333333333333333333333333",
+	} {
+		unchanged, err := st.GetCrash(ctx, id)
+		if err != nil || unchanged.InputHash != wantHash {
+			t.Fatalf("crash %d should remain unmodified with hash %s, got %+v (err=%v)", id, wantHash, unchanged, err)
+		}
+	}
+
+	// Verify historical replay record for origHash is preserved AND NeedsReplay is immediately true on current revision 141de7abe3fc.
+	replays, err := st.ListCrashReplays(ctx)
+	if err != nil || len(replays) != 1 || replays[0].InputHash != origHash || replays[0].Outcome != "blocked" {
+		t.Fatalf("expected historical blocked replay for %s preserved, got %+v (err=%v)", origHash, replays, err)
+	}
+	needed, err := st.NeedsReplay(ctx, repaired, "141de7abe3fc")
+	if err != nil || !needed {
+		t.Fatalf("expected repaired crash to immediately need replay on 141de7abe3fc, got needed=%t err=%v", needed, err)
 	}
 }

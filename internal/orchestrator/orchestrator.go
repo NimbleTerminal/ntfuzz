@@ -533,9 +533,14 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 		}
 		inputBytes := crash.InputBytes
 		inputTrunc := crash.InputTruncated
+		inputHash := crash.InputHash
 		if len(inputBytes) == 0 && minInput != "" && minInput != "inline-failure" {
-			if raw, readErr := os.ReadFile(minInput); readErr == nil {
+			if raw, readErr := os.ReadFile(minInput); readErr == nil && len(raw) > 0 {
 				inputBytes, inputTrunc = CapCrashInput(raw)
+				fullHash := store.HashCrashInput(raw)
+				if inputHash == "" || filepath.Base(minInput) == fullHash {
+					inputHash = fullHash
+				}
 			}
 		}
 		_, crashErr := o.store.RecordCrash(ctx, store.Crash{
@@ -544,7 +549,7 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 			LastSeen:         time.Now().UTC(),
 			Stack:            scrubbedStack,
 			StackFingerprint: fp,
-			InputHash:        crash.InputHash,
+			InputHash:        inputHash,
 			MinimizedInput:   minInput,
 			InputBytes:       inputBytes,
 			InputTruncated:   inputTrunc,
@@ -570,7 +575,7 @@ func (o *Orchestrator) executeTarget(ctx context.Context, workerID string, item 
 				"worker", workerID,
 				"project", job.Project,
 				"target", job.TargetName,
-				"hash", crash.InputHash,
+				"hash", inputHash,
 				"fp", crash.StackFingerprint,
 			)
 		}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -579,5 +580,91 @@ func TestProjectsSyncErrorAndRepoRedaction(t *testing.T) {
 	}
 	if strings.Contains(p.SyncError, "ghp_abc") || strings.Contains(p.SyncError, "ghp_secret999") {
 		t.Fatalf("expected redacted SyncError, got %q", p.SyncError)
+	}
+}
+
+func TestRepairCrashesEndpointAndSnapshotGuard(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	st, err := store.Open(filepath.Join(tmp, "api_repair.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	pID, err := st.SyncProject(ctx, store.ProjectSyncInput{
+		Name:     "nthtml",
+		Repo:     "https://github.com/NimbleTerminal/nthtml.git",
+		GitSHA:   "141de7abe3fc",
+		SyncedAt: &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tID, err := st.UpsertTarget(ctx, pID, "nimbleterminal.dev/nthtml/document", "FuzzSupports")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	crashDir := filepath.Join(tmp, "corpus", "nthtml", "crashes", "nimbleterminal.dev_nthtml_document", "FuzzSupports")
+	if err := os.MkdirAll(crashDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reproBytes := []byte("go test fuzz v1\nstring(\"(:\\xbc\\xbcvAr())\")\n")
+	reproHash := store.HashCrashInput(reproBytes)
+	reproPath := filepath.Join(crashDir, reproHash)
+	if err := os.WriteFile(reproPath, reproBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cID, err := st.RecordCrash(ctx, store.Crash{
+		TargetID:         tID,
+		FirstSeen:        now,
+		LastSeen:         now,
+		Stack:            "panic: slice bounds out of range [9:7]",
+		StackFingerprint: "c6dc7ec1d16d48aaad5fbcb9",
+		InputHash:        reproHash,
+		MinimizedInput:   reproPath,
+		InputBytes:       reproBytes,
+		GitSHA:           "c024ebde43e6",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	liveSrv := httptest.NewServer(NewServer(st, nil))
+	defer liveSrv.Close()
+	snapSrv := httptest.NewServer(NewSnapshotServer(st, store.Snapshot{
+		File:          "snapshot-1.duckdb",
+		PublishedAt:   now,
+		SchemaVersion: store.CurrentSchemaVersion,
+	}))
+	defer snapSrv.Close()
+
+	// Snapshot viewer must not expose POST /api/crashes/repair.
+	snapClient := NewClient(snapSrv.URL)
+	if _, err := snapClient.RepairCrashes(ctx, CrashRepairOptions{DryRun: true}); err == nil {
+		t.Fatal("expected snapshot viewer to reject POST /api/crashes/repair")
+	}
+
+	// Non-dry-run without crash_ids or all=true returns 400.
+	liveClient := NewClient(liveSrv.URL)
+	if _, err := liveClient.RepairCrashes(ctx, CrashRepairOptions{DryRun: false}); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+		t.Fatalf("expected 400 when applying without crash_ids or all, got %v", err)
+	}
+
+	// Unknown crash ID returns 404.
+	if _, err := liveClient.RepairCrashes(ctx, CrashRepairOptions{CrashIDs: []int64{99999}, DryRun: true}); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("expected 404 for unknown crash ID, got %v", err)
+	}
+
+	// Dry-run and apply on existing crash succeed.
+	rep, err := liveClient.RepairCrashes(ctx, CrashRepairOptions{CrashIDs: []int64{cID}, DryRun: true})
+	if err != nil {
+		t.Fatalf("RepairCrashes dry-run: %v", err)
+	}
+	if !rep.DryRun || len(rep.Actions) != 1 || rep.Actions[0].Status != store.RepairStatusConsistent {
+		t.Fatalf("unexpected repair report: %+v", rep)
 	}
 }

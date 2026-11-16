@@ -23,6 +23,7 @@ Both `ntfuzz serve` and `ntfuzz view` serve the same read-only JSON, HTML, and M
 | `GET /api/crashes/{id}/report.md` | `serve`, `view` | `text/markdown` | Shareable Markdown crash report for upstream maintainers (accepts optional `?public_url=https://...`). |
 | `POST /api/crashes/{id}/issue` | `serve` only | `application/json` | Attach or update `issue_url` on a crash without marking it fixed. Body: `{"issue_url": "https://..."}`. |
 | `POST /api/crashes/{id}/fix` | `serve` only | `application/json` | Mark a crash as fixed and optionally set `issue_url`. Body: `{"issue_url": "https://..."}` (or empty body). |
+| `POST /api/crashes/repair` | `serve` only | `application/json` | Inspect or repair crash reproducer metadata after verifying corpus provenance. Body: `{"crash_ids": [25, 26, 27], "dry_run": true}`. |
 | `GET /api/coverage/history` | `serve`, `view` | `application/json` | Chronological `coverage_pct` and `corpus_count` series for a target (`?target=<id-or-name>&limit=50`). |
 | `GET /api/stats/{query}` | `serve`, `view` | `application/json` | Time-bucketed analytical series (`throughput`, `coverage`, `outcomes`, `revisions`, `burndown`). Also accessible at `GET /api/stats?query=...`. |
 | `GET /api/crash-replays` | `serve`, `view` | `application/json` | Saved-input replay verification rows across revisions (`?project=...&target=...&crash_id=...&status=...&limit=100`). |

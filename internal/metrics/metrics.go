@@ -565,6 +565,8 @@ func ClassifyRoute(path string) string {
 		return "/api/runs"
 	case "/api/crashes":
 		return "/api/crashes"
+	case "/api/crashes/repair":
+		return "/api/crashes/repair"
 	case "/api/coverage/history":
 		return "/api/coverage/history"
 	case "/api/crash-replays":

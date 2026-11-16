@@ -38,6 +38,7 @@
   - `GET /api/crashes/{id}/report.md` — shareable Markdown crash report for upstream maintainers
   - `POST /api/crashes/{id}/issue` — attach an upstream `issue_url` to an open crash without marking it fixed (`serve` only)
   - `POST /api/crashes/{id}/fix` — mark a crash fixed (and optionally attach `issue_url`, `serve` only)
+  - `POST /api/crashes/repair` — inspect or repair inconsistent crash reproducer metadata after verifying corpus provenance (`serve` only)
   - `GET /api/coverage/history?target=...` — chronological coverage & corpus growth series
   - `GET /api/stats/{query}?window=24h&project=...` — canned time-bucketed analytical queries (`throughput`, `coverage`, `outcomes`, `revisions`, `burndown`) over `1h`, `6h`, `24h`, `7d`, or `14d`
   - `GET /api/status` — fleet health, 24h run counts, schema version, and active worker jobs
@@ -87,6 +88,7 @@ Then:
   ./bin/ntfuzz crash list --api http://127.0.0.1:8080
   ./bin/ntfuzz crash link 1 --issue https://github.com/org/repo/issues/42
   ./bin/ntfuzz crash report 1 --api http://127.0.0.1:8080 --public-url https://fuzz.example.com
+  ./bin/ntfuzz crash repair --dry-run 25 26 27 --api http://127.0.0.1:8080
   ./bin/ntfuzz crash fixed 1 --issue https://github.com/org/repo/issues/42
   ```
 - **HTTP JSON API**:

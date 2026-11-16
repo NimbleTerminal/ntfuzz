@@ -97,3 +97,7 @@ When a project advances to a new clean Git commit (`git_sha`), `ntfuzz` does **n
    - **`failed`**: the saved input still reproduces on the new revision. If the crash had been marked fixed manually, `ntfuzz` automatically reopens it.
    - **`blocked`**: the input file is missing, the checkout is dirty, the package failed to build, the target was removed, or the replay timed out. Blocked checks never close a crash and are retried after 1 hour.
    - **`pending`**: awaiting replay on the current revision.
+
+### Repairing historical reproducer mismatches
+
+If a crash record reports replay `blocked` with `"saved input hash mismatch"`, use [`ntfuzz crash repair`](../commands/#ntfuzz-crash-repair) to inspect candidate corpus files (`--dry-run`) and repair verified records without losing crash IDs, reporting metadata, or historical replay rows. Repaired records immediately become eligible for replay on the project's current revision without requiring a new Git commit, and only close after the saved reproducer actually executes and passes.

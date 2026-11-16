@@ -59,6 +59,7 @@ func TestBoundedRouteMethodStatusClassification(t *testing.T) {
 		"/api/targets":                     "/api/targets",
 		"/api/runs":                        "/api/runs",
 		"/api/crashes":                     "/api/crashes",
+		"/api/crashes/repair":              "/api/crashes/repair",
 		"/crashes/23":                      "/crashes/{id}",
 		"/crashes/23/extra":                "other",
 		"/api/crashes/23":                  "/api/crashes/{id}",

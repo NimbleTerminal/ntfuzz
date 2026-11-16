@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -346,6 +348,132 @@ func newCrashCmd() *cobra.Command {
 	}
 	reportCmd.Flags().StringVar(&publicURL, "public-url", "", "Public base URL for permalink and input download links (defaults to --api)")
 
-	crashCmd.AddCommand(listCmd, fixedCmd, linkCmd, reportCmd)
+	repairCmd := newCrashRepairCmd(&apiURL)
+	crashCmd.AddCommand(listCmd, fixedCmd, linkCmd, reportCmd, repairCmd)
 	return crashCmd
+}
+
+func newCrashRepairCmd(apiURL *string) *cobra.Command {
+	var (
+		dryRun     bool
+		all        bool
+		dbPath     string
+		corpusDir  string
+		jsonOutput bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "repair [crash-id...]",
+		Short: "Inspect and repair inconsistent crash reproducer metadata after verifying corpus provenance",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var crashIDs []int64
+			for _, rawArg := range args {
+				for part := range strings.SplitSeq(rawArg, ",") {
+					part = strings.TrimSpace(part)
+					if part == "" {
+						continue
+					}
+					id, err := strconv.ParseInt(part, 10, 64)
+					if err != nil || id <= 0 {
+						return fmt.Errorf("invalid crash ID %q", part)
+					}
+					crashIDs = append(crashIDs, id)
+				}
+			}
+
+			opts := store.CrashRepairOptions{
+				CrashIDs:  crashIDs,
+				All:       all,
+				DryRun:    dryRun,
+				CorpusDir: corpusDir,
+			}
+
+			var report store.CrashRepairReport
+			var err error
+			if strings.TrimSpace(dbPath) != "" {
+				st, openErr := store.Open(dbPath)
+				if openErr != nil {
+					return fmt.Errorf("open duckdb store %q: %w", dbPath, openErr)
+				}
+				defer func() { _ = st.Close() }()
+				report, err = st.RepairCrashes(cmd.Context(), opts)
+			} else {
+				if strings.TrimSpace(corpusDir) != "" {
+					return fmt.Errorf("--corpus-dir requires --db")
+				}
+				client := api.NewClient(*apiURL)
+				report, err = client.RepairCrashes(cmd.Context(), opts)
+			}
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if jsonOutput {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(report)
+			}
+			formatCrashRepairReport(out, report)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Inspect candidate corpus files and report proposed repairs without modifying the database")
+	cmd.Flags().BoolVar(&all, "all", false, "Allow repairing all repairable crashes when no explicit crash IDs are specified")
+	cmd.Flags().StringVarP(&dbPath, "db", "d", "", "Optional path to DuckDB database file for direct offline repair (uses --api when omitted)")
+	cmd.Flags().StringVar(&corpusDir, "corpus-dir", "", "Optional corpus directory override when inspecting candidate files with --db")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print repair report as JSON")
+
+	return cmd
+}
+
+func formatCrashRepairReport(out io.Writer, report store.CrashRepairReport) {
+	mode := "APPLY"
+	if report.DryRun {
+		mode = "DRY-RUN"
+	}
+	if len(report.Actions) == 0 {
+		_, _ = fmt.Fprintf(out, "[%s] No matching crashes.\n", mode)
+		return
+	}
+	counts := map[string]int{}
+	for _, a := range report.Actions {
+		counts[a.Status]++
+		_, _ = fmt.Fprintf(out, "[#%d] %s  %s/%s@%s  status=%s  replay_eligible=%t\n",
+			a.CrashID, mode, a.ProjectName, a.TargetName, a.GitSHA, strings.ToUpper(a.Status), a.ReplayEligible)
+		_, _ = fmt.Fprintf(out, "  reason: %s\n", a.Reason)
+		if a.OldInputHash != a.NewInputHash || a.OldMinimizedInput != a.NewMinimizedInput || a.OldInputBytesLen != a.NewInputBytesLen || a.OldInputTruncated != a.NewInputTruncated {
+			_, _ = fmt.Fprintf(out, "  input_hash:      %s -> %s\n", a.OldInputHash, a.NewInputHash)
+			_, _ = fmt.Fprintf(out, "  minimized_input: %s -> %s\n", a.OldMinimizedInput, a.NewMinimizedInput)
+			_, _ = fmt.Fprintf(out, "  input_bytes:     %d bytes (truncated=%t) -> %d bytes (truncated=%t)\n",
+				a.OldInputBytesLen, a.OldInputTruncated, a.NewInputBytesLen, a.NewInputTruncated)
+		} else {
+			_, _ = fmt.Fprintf(out, "  input_hash:      %s\n", a.OldInputHash)
+			_, _ = fmt.Fprintf(out, "  minimized_input: %s\n", a.OldMinimizedInput)
+			_, _ = fmt.Fprintf(out, "  input_bytes:     %d bytes (truncated=%t)\n", a.OldInputBytesLen, a.OldInputTruncated)
+		}
+		for _, cand := range a.Candidates {
+			mtime := ""
+			if cand.ModTime != nil {
+				mtime = " mtime=" + cand.ModTime.UTC().Format(time.RFC3339)
+			}
+			pathInfo := ""
+			if cand.Path != "" {
+				pathInfo = " path=" + cand.Path
+			}
+			_, _ = fmt.Fprintf(out, "  candidate[%s]: hash=%s size=%d valid_fuzz_v1=%t matches_db=%t%s%s preview=%q\n",
+				cand.Role, cand.ContentHash, cand.SizeBytes, cand.ValidFormat, cand.MatchesDB, mtime, pathInfo, cand.Preview)
+		}
+	}
+	_, _ = fmt.Fprintf(out, "Summary (%s): total=%d consistent=%d repairable=%d repaired=%d missing=%d corrupt=%d ambiguous=%d\n",
+		mode,
+		len(report.Actions),
+		counts[store.RepairStatusConsistent],
+		counts[store.RepairStatusRepairable],
+		counts[store.RepairStatusRepaired],
+		counts[store.RepairStatusMissing],
+		counts[store.RepairStatusCorrupt],
+		counts[store.RepairStatusAmbiguous],
+	)
 }

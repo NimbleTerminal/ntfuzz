@@ -18,6 +18,7 @@ var (
 		"/api/targets":                true,
 		"/api/runs":                   true,
 		"/api/crashes":                true,
+		"/api/crashes/repair":         true,
 		"/api/crashes/{id}":           true,
 		"/api/crashes/{id}/fix":       true,
 		"/api/crashes/{id}/issue":     true,

@@ -76,6 +76,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /crashes/{$}", s.handleCrashIndexHTML)
 	s.mux.HandleFunc("GET /crashes/{id}", s.handleCrashHTML)
 	if s.snapshot == nil {
+		s.mux.HandleFunc("POST /api/crashes/repair", s.handleRepairCrashes)
 		s.mux.HandleFunc("POST /api/crashes/{id}/fix", s.handleFixCrash)
 		s.mux.HandleFunc("POST /api/crashes/{id}/issue", s.handleIssueCrash)
 	}
@@ -195,6 +196,34 @@ func (s *Server) handleFixCrash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "fixed", "id": crashID})
+}
+
+func (s *Server) handleRepairCrashes(w http.ResponseWriter, r *http.Request) {
+	var req CrashRepairOptions
+	if r.Body != nil {
+		dec := json.NewDecoder(io.LimitReader(r.Body, 16384))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid JSON request body: %w", err))
+			return
+		}
+	}
+	// Never allow an HTTP request to override the server's local corpus directory path.
+	req.CorpusDir = ""
+
+	report, err := s.store.RepairCrashes(r.Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeError(w, http.StatusNotFound, err)
+		case errors.Is(err, store.ErrRepairSelectionRequired), strings.Contains(err.Error(), "invalid crash id"):
+			writeError(w, http.StatusBadRequest, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) handleCoverageHistory(w http.ResponseWriter, r *http.Request) {

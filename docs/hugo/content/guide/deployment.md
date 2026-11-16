@@ -120,6 +120,7 @@ ssh -N -L 8080:127.0.0.1:8080 root@fuzz.example.com
 # Terminal 2: run the operator TUI or crash CLI against the tunnel
 ntfuzz tui --api http://127.0.0.1:8080
 ntfuzz crash list --api http://127.0.0.1:8080
+ntfuzz crash repair --dry-run 25 26 27 --api http://127.0.0.1:8080
 ntfuzz crash link 23 --issue https://github.com/org/repo/issues/42 --api http://127.0.0.1:8080
 ntfuzz crash fixed 23 --issue https://github.com/org/repo/issues/42 --api http://127.0.0.1:8080
 ```

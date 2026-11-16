@@ -163,6 +163,29 @@ ntfuzz crash fixed 23 --issue https://github.com/qmuntal/gltf/issues/123
 | --- | --- | --- |
 | `--issue` | `""` | Optional `http://` or `https://` issue URL to record on the crash. |
 
+#### `ntfuzz crash repair [crash-id...]`
+
+Inspect crash records for reproducer metadata inconsistencies (`input_hash`, `minimized_input`, `input_bytes`, and `input_truncated`), verify candidate `go test fuzz v1` corpus files on disk and their provenance, and atomically repair verified records while preserving crash IDs, reporting metadata, and historical `crash_replays` rows.
+
+```sh
+# Dry-run inspection via the private writer API (no database changes)
+ntfuzz crash repair --dry-run 25 26 27 --api http://127.0.0.1:8080
+
+# Apply repairs for explicit crash IDs via the private writer API
+ntfuzz crash repair 25 26 27 --api http://127.0.0.1:8080
+
+# Or run directly against a stopped DuckDB database file
+ntfuzz crash repair 25 26 27 --db /var/lib/ntfuzz/ntfuzz.duckdb
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--dry-run` | `false` | Inspect candidate corpus files and report proposed repairs without modifying the database. |
+| `--all` | `false` | Allow repairing all repairable crashes when no explicit crash IDs are passed. |
+| `--db`, `-d` | `""` | Open a DuckDB database file directly for offline repair instead of calling `--api`. |
+| `--corpus-dir` | `""` | Optional corpus directory override when inspecting candidate files with `--db`. |
+| `--json` | `false` | Print the repair inspection/action report as JSON. |
+
 ---
 
 ## `ntfuzz version`

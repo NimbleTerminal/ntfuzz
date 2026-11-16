@@ -296,12 +296,38 @@ In a second terminal on your workstation:
 # Launch the interactive operator TUI (supports pressing 'x' in Open Crashes view)
 ntfuzz tui --api http://127.0.0.1:8080
 
-# Or list and mark crashes fixed from the CLI
+# Or list, repair reproducer metadata, and mark crashes fixed from the CLI
 ntfuzz crash list --api http://127.0.0.1:8080
+ntfuzz crash repair --dry-run 25 26 27 --api http://127.0.0.1:8080
 ntfuzz crash fixed 42 --api http://127.0.0.1:8080
 ```
 
 Once a crash is marked fixed on the writer, the next published snapshot (default `1m`) updates the public dashboard automatically. If a future fuzz run reproduces the same input hash or normalized stack fingerprint, `ntfuzz` automatically reopens the crash.
+
+#### Repairing Inconsistent Crash Reproducers (`ntfuzz crash repair`)
+
+If a historical crash record reports replay `blocked` with `"saved input hash mismatch"`, use `ntfuzz crash repair` to inspect and repair the reproducer metadata (`input_hash`, `minimized_input`, `input_bytes`, and `input_truncated`) without altering crash IDs, reporting metadata (`first_seen`, `last_seen`, `git_sha`, `issue_url`, `blamed_*`), or historical `crash_replays` records:
+
+1. **Inspect with `--dry-run` first**:
+   ```bash
+   ntfuzz crash repair --dry-run 25 26 27 --api http://127.0.0.1:8080
+   ```
+   `ntfuzz` verifies that each candidate corpus file exists inside the target's crash directory, contains a valid `go test fuzz v1` corpus header, hashes to its filename (`SHA-256[:16]`), matches the stored `input_bytes` in DuckDB byte-for-byte, and does not collide with another crash on the same target. Missing, corrupt, or ambiguous inputs are reported and never modified.
+2. **Back up the database before applying repairs**:
+   - **Online backup (without stopping `ntfuzz-serve`)**: copy the latest immutable snapshot from `/var/lib/ntfuzz/public/snapshot-*.duckdb` together with `/var/lib/ntfuzz/corpus/`.
+   - **Stopped-writer backup (for direct `--db` repair or full WAL preservation)**: stop `ntfuzz-serve` (`sudo systemctl stop ntfuzz-serve.service` or `ntfuzz.service`) and archive `live.duckdb` (plus any `.wal` file) and `corpus/` together before mutating the database.
+3. **Apply the repair for explicit crash IDs**:
+   ```bash
+   # Via the private writer API over the SSH tunnel:
+   ntfuzz crash repair 25 26 27 --api http://127.0.0.1:8080
+
+   # Or offline directly against the stopped writer database:
+   sudo runuser -u ntfuzz -- /usr/local/bin/ntfuzz crash repair 25 26 27 --db /var/lib/ntfuzz/private/live.duckdb
+   ```
+4. **Replay verification & snapshot propagation**:
+   - Repairing a crash does **not** mark it fixed. Instead, it resets any 1-hour blocked replay cooldown for the repaired input hash so the crash is immediately eligible (`replay_eligible=true`) on the project's current revision without requiring a new upstream Git commit.
+   - On the next orchestrator round, `ntfuzz serve` prioritizes the target (`priority = -1`), executes the saved reproducer in an isolated module copy, and marks the crash resolved only if the named subtest executes and passes.
+   - The writer publishes the updated state to `/var/lib/ntfuzz/public` on the next `--snapshot-interval` tick (default `1m`), and `ntfuzz view` picks up the new `current.json` generation within `--refresh` (default `10s`).
 
 ### 5.2 Adding Repositories & Tuning Fuzz Budgets
 

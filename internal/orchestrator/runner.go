@@ -196,14 +196,24 @@ func (r *LocalRunner) RunTarget(ctx context.Context, job JobSpec) (JobResult, er
 			srcPath, ok := resolveSafeCrashInputPath(rec.MinimizedInput, pkgDir, job.RepoDir, absCorpusRoot)
 			if !ok {
 				rec.MinimizedInput = "inline-failure"
+				rec.InputBytes = nil
+				rec.InputTruncated = false
 				continue
 			}
-			if raw, readErr := os.ReadFile(srcPath); readErr == nil {
-				rec.InputBytes, rec.InputTruncated = CapCrashInput(raw)
+			raw, readErr := os.ReadFile(srcPath)
+			if readErr != nil || len(raw) == 0 {
+				rec.MinimizedInput = "inline-failure"
+				rec.InputBytes = nil
+				rec.InputTruncated = false
+				continue
 			}
+			rec.InputBytes, rec.InputTruncated = CapCrashInput(raw)
+			rec.InputHash = store.HashCrashInput(raw)
 			if persistedPath, contentHash, copyErr := persistCrashInput(srcPath, crashStoreDir, job.CleanCrashInGit); copyErr == nil {
 				rec.MinimizedInput = persistedPath
 				rec.InputHash = contentHash
+			} else {
+				rec.MinimizedInput = srcPath
 			}
 		}
 	}

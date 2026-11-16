@@ -138,6 +138,13 @@ func (c *Client) SetCrashIssue(ctx context.Context, crashID int64, issueURL stri
 	return c.doJSON(ctx, http.MethodPost, path, nil, IssueCrashRequest{IssueURL: issueURL}, nil)
 }
 
+// RepairCrashes inspects or repairs crash reproducer records via POST /api/crashes/repair.
+func (c *Client) RepairCrashes(ctx context.Context, opts CrashRepairOptions) (CrashRepairReport, error) {
+	var out CrashRepairReport
+	err := c.doJSON(ctx, http.MethodPost, "/api/crashes/repair", nil, opts, &out)
+	return out, err
+}
+
 // GetCoverageHistory fetches chronological coverage points from GET /api/coverage/history.
 func (c *Client) GetCoverageHistory(ctx context.Context, target string) ([]CoveragePoint, error) {
 	q := url.Values{}
